@@ -87,12 +87,13 @@ the `i` menu (no environment variables required) and analysis always shows the s
       request/response cycle; UI tests cover terminal rendering and input handling.)
 - [x] Render PDF exports with Typst and document/check the runtime dependency.
 - [x] Document configuration, troubleshooting, and release installation. (README covers
-      configuration, controls, and installation; `packaging/aur/` contains the AUR build.)
-- [x] Package a versioned release and verify installation on supported environments. (AUR packaging
-      in `packaging/aur/` with build check and runtime dependency on Typst.)
+      configuration, controls, and installation; `packaging/` contains the per-distro builds.)
+- [x] Package a versioned release and verify installation on supported environments. (AUR in
+      `packaging/aur/`, Debian `.deb` via `packaging/debian/build-deb.sh`, Fedora RPM spec in
+      `packaging/rpm/`, and a Nix derivation in `packaging/nix/` that wraps Typst onto PATH.)
 
 **Exit check:** a fresh user can install, configure, use, and troubleshoot the first release from
-the documentation alone. **Met** — the README and `packaging/aur/` together cover installation,
+the documentation alone. **Met** — the README and `packaging/` together cover installation,
 configuration, usage, and troubleshooting.
 
 ## Later opportunities
