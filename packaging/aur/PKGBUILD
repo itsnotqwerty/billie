@@ -1,0 +1,33 @@
+# Maintainer: Samuel Roux <office@gatewaycorporate.org>
+pkgname=billie
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="AI-powered TUI for the Congress.gov API — search, compare, analyze legislation"
+arch=('x86_64')
+url="https://github.com/sam/billie"
+license=('MIT')
+depends=('glibc' 'typst')
+makedepends=('deno' 'git')
+# Deno compiles a single self-contained binary; stripping is a no-op and noisy.
+options=('!strip')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/itsnotqwerty/billie/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  deno task build
+}
+
+check() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  deno task check
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  install -Dm755 dist/billie "${pkgdir}/usr/bin/billie"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dm644 docs/spec.md "${pkgdir}/usr/share/doc/${pkgname}/spec.md"
+  install -Dm644 docs/design.md "${pkgdir}/usr/share/doc/${pkgname}/design.md"
+  install -Dm644 docs/roadmap.md "${pkgdir}/usr/share/doc/${pkgname}/roadmap.md"
+}

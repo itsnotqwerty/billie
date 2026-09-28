@@ -1,0 +1,14 @@
+Package: billie
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Samuel Roux <office@gatewaycorporate.org>
+Recommends: typst
+Description: AI-powered TUI for the Congress.gov API
+ Billie is a terminal UI for searching, comparing, and analyzing US
+ legislation via the Congress.gov API, with optional AI-assisted
+ analysis through any OpenAI-compatible endpoint.
+ .
+ PDF export requires the Typst compiler at runtime; all other features
+ work without it.

@@ -1,0 +1,4 @@
+dist/
+exports/
+.env
+*.local.json
