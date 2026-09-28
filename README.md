@@ -21,7 +21,8 @@ variables are required.
   Inside a verbatim text view (a bill or a side-by-side comparison), `s` searches the displayed text
   instead. `n` / `N`, Right/Left, and `.` / `,` jump to the next and previous match.
 - `Enter`: View details of the selected bill.
-- `Space` / `m`: Mark/unmark the selected bill in the results list (up to two).
+- `Space` / `m`: Mark/unmark the selected bill in the results list (up to two). Marks are cleared
+  when you return to the main menu.
 - `c`: Compare the two marked bills (metadata + action-list diff).
 - `a`: Analyze the open bill using AI. In comparison mode, enter a question about how the two bills
   differ; analysis fetches available verbatim text for the bill or both compared bills. Large texts

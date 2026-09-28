@@ -187,7 +187,12 @@ export class App {
       this.status = "Cancelled.";
       return;
     }
-    this.view = this.history.pop() ?? "menu";
+    const destination = this.history.pop() ?? "menu";
+    if (destination === "menu" && this.marked.size > 0) {
+      this.marked.clear();
+      this.status = "Marks cleared.";
+    }
+    this.view = destination;
   }
 
   private reset(): void {

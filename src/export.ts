@@ -366,13 +366,8 @@ function typstTable(rows: string[][]): string {
       return rowIndex === 0 ? `[#strong[${content}]]` : `[${content}]`;
     })
   );
-  // Booktabs-style rules: top, under the header, and bottom only — no inner
-  // horizontal lines or vertical strokes, which keeps wide comparison tables readable.
   return [
-    `#table(columns: ${columnCount}, stroke: none, inset: (x: 4pt, y: 3pt),`,
-    "  table.hline(y: 0, stroke: 0.8pt),",
-    "  table.hline(y: 1, stroke: 0.5pt),",
-    `  table.hline(y: ${rows.length}, stroke: 0.8pt),`,
+    `#table(columns: ${columnCount}, stroke: 0.5pt, inset: 4pt,`,
     ...cells.map((cell) => `  ${cell},`),
     ")",
   ].join("\n");

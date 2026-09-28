@@ -92,12 +92,7 @@ Deno.test("serializeExport supports every native format and style", async () => 
     false,
   );
   const typst = markdownToTypst(markdown, true);
-  assertEquals(typst.includes("#table(columns: 2, stroke: none,"), true);
-  assertEquals(typst.includes("table.hline(y: 0, stroke: 0.8pt)"), true);
-  assertEquals(typst.includes("table.hline(y: 1, stroke: 0.5pt)"), true);
-  // Header + one body row = 2 rows; only top, under-header, and bottom rules.
-  assertEquals(typst.includes("table.hline(y: 2, stroke: 0.8pt)"), true);
-  assertEquals(typst.split("table.hline").length - 1, 3);
+  assertEquals(typst.includes("#table(columns: 2, stroke: 0.5pt, inset: 4pt,"), true);
   assertEquals(typst.includes('#strong[#text("Field")]'), true);
   assertEquals(typst.includes('#text("A bill | act")'), true);
   assertEquals(markdownToTypst("Field | Value\n--- | ---\nA | B", true).includes("#table("), true);
