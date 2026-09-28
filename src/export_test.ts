@@ -91,6 +91,10 @@ Deno.test("serializeExport supports every native format and style", async () => 
     (await serializeExport(bundle, "html", "plain") as string).includes("<style>"),
     false,
   );
+  const html = await serializeExport(bundle, "html", "formatted") as string;
+  assertEquals(html.includes("<table><thead><tr><th>Field</th><th>Value</th></tr></thead>"), true);
+  assertEquals(html.includes("<td>A bill | act</td>"), true);
+  assertEquals(html.includes("| --- |"), false);
   const typst = markdownToTypst(markdown, true);
   assertEquals(typst.includes("#table(columns: 2, stroke: 0.5pt, inset: 4pt,"), true);
   assertEquals(typst.includes('#strong[#text("Field")]'), true);

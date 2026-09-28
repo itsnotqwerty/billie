@@ -316,17 +316,43 @@ function escapeHtml(value: string): string {
 }
 
 function markdownToHtml(markdown: string): string {
-  return markdown.split("\n").map((line) => {
+  const sourceLines = markdown.split("\n");
+  const outputLines: string[] = [];
+  for (let index = 0; index < sourceLines.length;) {
+    const header = parseTableRow(sourceLines[index]);
+    const separator = index + 1 < sourceLines.length ? parseTableRow(sourceLines[index + 1]) : null;
+    if (header && separator && isTableSeparator(separator)) {
+      const rows = [header];
+      index += 2;
+      while (index < sourceLines.length) {
+        const row = parseTableRow(sourceLines[index]);
+        if (!row) break;
+        if (!isTableSeparator(row)) rows.push(row);
+        index++;
+      }
+      outputLines.push(htmlTable(rows));
+      continue;
+    }
+
+    const line = sourceLines[index++];
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       const level = heading[1].length;
-      return `<h${level}>${escapeHtml(heading[2])}</h${level}>`;
+      outputLines.push(`<h${level}>${escapeHtml(heading[2])}</h${level}>`);
+      continue;
     }
     const item = /^\s*[-*+]\s+(.*)$/.exec(line);
-    if (item) return `<p class="list-item">${escapeHtml(item[1])}</p>`;
-    if (!line.trim()) return "";
-    return `<p>${escapeHtml(line)}</p>`;
-  }).join("\n");
+    if (item) {
+      outputLines.push(`<p class="list-item">${escapeHtml(item[1])}</p>`);
+      continue;
+    }
+    if (!line.trim()) {
+      outputLines.push("");
+      continue;
+    }
+    outputLines.push(`<p>${escapeHtml(line)}</p>`);
+  }
+  return outputLines.join("\n");
 }
 
 function parseTableRow(line: string): string[] | null {
@@ -355,6 +381,21 @@ function parseTableRow(line: string): string[] | null {
 
 function isTableSeparator(cells: string[]): boolean {
   return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function htmlTable(rows: string[][]): string {
+  const [header, ...body] = rows;
+  const head = `<thead><tr>${
+    header.map((cell) => `<th>${escapeHtml(cell.replaceAll("\u0000", "|"))}</th>`).join("")
+  }</tr></thead>`;
+  const bodyRows = body.map((row) =>
+    `<tr>${
+      row.map((cell) => `<td>${escapeHtml(cell.replaceAll("\u0000", "|"))}</td>`).join("")
+    }</tr>`
+  );
+  return bodyRows.length > 0
+    ? `<table>${head}<tbody>${bodyRows.join("")}</tbody></table>`
+    : `<table>${head}</table>`;
 }
 
 function typstTable(rows: string[][]): string {
@@ -462,7 +503,7 @@ export async function serializeExport(
       ].join("\r\n");
     case "html": {
       const styleBlock = style === "formatted"
-        ? "<style>body{font:16px/1.55 sans-serif;max-width:900px;margin:3rem auto;padding:0 1rem;color:#20252b}h1,h2,h3{line-height:1.2}p{white-space:pre-wrap}.list-item{padding-left:1.5rem}</style>"
+        ? "<style>body{font:16px/1.55 sans-serif;max-width:900px;margin:3rem auto;padding:0 1rem;color:#20252b}h1,h2,h3{line-height:1.2}p{white-space:pre-wrap}.list-item{padding-left:1.5rem}table{border-collapse:collapse;margin:1rem 0}th,td{border:1px solid #c7ccd1;padding:0.3rem 0.6rem;text-align:left;vertical-align:top;white-space:pre-wrap}thead th{border-top:2px solid #20252b}tr:last-child td{border-bottom:2px solid #20252b}</style>"
         : "";
       return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${
         escapeHtml(bundle.title)
