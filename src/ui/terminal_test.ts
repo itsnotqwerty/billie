@@ -1,4 +1,11 @@
-import { parseKeys, truncate, wrap } from "./terminal.ts";
+import {
+  decodeKeyStream,
+  KeyDecoder,
+  parseKeys,
+  sanitizeTerminalText,
+  truncate,
+  wrap,
+} from "./terminal.ts";
 import { assertEquals } from "@std/assert";
 
 Deno.test("parseKeys decodes printable characters", () => {
@@ -44,4 +51,55 @@ Deno.test("wrap splits long text across lines with indentation", () => {
   assertEquals(lines.every((line) => line.length <= 16), true);
   assertEquals(lines.every((line) => line.startsWith("  ")), true);
   assertEquals(lines.join(" ").replace(/\s+/g, " ").trim(), "alpha beta gamma delta epsilon");
+});
+
+Deno.test("terminal content strips CSI, OSC, C1, and embedded line controls", () => {
+  assertEquals(sanitizeTerminalText("before\x1b[2Jafter\r\n\t\x00"), "beforeafter");
+  assertEquals(sanitizeTerminalText("\x1b]52;c;dGVzdA==\x07text"), "text");
+  assertEquals(
+    sanitizeTerminalText("\x1b]8;;https://example.test\x1b\\link\x1b]8;;\x1b\\"),
+    "link",
+  );
+  assertEquals(sanitizeTerminalText("\x9b2Jhello\x85world"), "helloworld");
+  assertEquals(sanitizeTerminalText("Legislation: café"), "Legislation: café");
+});
+
+Deno.test("KeyDecoder handles every chunk boundary for UTF-8 and escape sequences", () => {
+  const bytes = new TextEncoder().encode("é日😀\x1b[A\x1b[6~\x1bOHtext");
+  const expected = parseKeys(bytes);
+  for (let split = 0; split <= bytes.length; split++) {
+    const decoder = new KeyDecoder();
+    assertEquals([
+      ...decoder.push(bytes.slice(0, split)),
+      ...decoder.push(bytes.slice(split)),
+      ...decoder.finish(),
+    ], expected);
+  }
+  const decoder = new KeyDecoder();
+  assertEquals([...bytes].flatMap((byte) => decoder.push(new Uint8Array([byte]))), expected);
+});
+
+Deno.test("KeyDecoder flushes standalone Escape without flushing incomplete UTF-8", () => {
+  const decoder = new KeyDecoder();
+  assertEquals(decoder.push(new Uint8Array([0x1b])), []);
+  assertEquals(decoder.awaitingEscape, true);
+  assertEquals(decoder.flushEscape(), [{ kind: "escape" }]);
+  assertEquals(decoder.push(new Uint8Array([0xc3])), []);
+  assertEquals(decoder.awaitingEscape, false);
+  assertEquals(decoder.push(new Uint8Array([0xa9])), [{ kind: "char", value: "é" }]);
+});
+
+Deno.test("decodeKeyStream emits Escape on timeout and reuses the pending read", async () => {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => release = resolve);
+  async function* chunks() {
+    yield new Uint8Array([0x1b]);
+    await pending;
+    yield new TextEncoder().encode("q");
+  }
+  const keys = decodeKeyStream(chunks(), 1);
+  assertEquals((await keys.next()).value, { kind: "escape" });
+  release();
+  assertEquals((await keys.next()).value, { kind: "char", value: "q" });
+  assertEquals((await keys.next()).done, true);
 });

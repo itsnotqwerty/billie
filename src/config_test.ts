@@ -4,6 +4,7 @@ import {
   DEFAULT_AI_TIMEOUT_MS,
   defaultExportDir,
   expandHomePath,
+  isLocalAiEndpoint,
   loadConfig,
   maskSecret,
   redactSecrets,
@@ -103,6 +104,12 @@ Deno.test("redactSecrets masks configured keys only", () => {
 Deno.test("maskSecret reveals only the last four characters", () => {
   assertEquals(maskSecret(null), "(not set)");
   assertEquals(maskSecret("abcdef1234"), "…1234");
+  assertEquals(maskSecret("abc"), "***");
+});
+
+Deno.test("redactSecrets masks short and overlapping secrets", () => {
+  const config = baseConfig({ congressApiKey: "abc", aiApiKey: "abcdef" });
+  assertEquals(redactSecrets("abc abcdef", config), "*** ***");
 });
 
 Deno.test("saveAiApiKey persists without requiring an environment variable", async () => {
@@ -142,5 +149,22 @@ Deno.test("saveExportDir persists and reloads the export destination", async () 
     assertEquals(config.exportDir, "/tmp/billie-output");
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("keyless AI configuration accepts only valid loopback HTTP endpoints", () => {
+  for (const url of ["http://localhost:11434/v1", "http://127.0.0.1:8080/v1", "https://[::1]/v1"]) {
+    assertEquals(isLocalAiEndpoint(url), true);
+  }
+  for (
+    const url of [
+      "not a URL",
+      "file://localhost/v1",
+      "https://api.openai.com/v1",
+      "http://localhost.example/v1",
+      "http://key@localhost/v1",
+    ]
+  ) {
+    assertEquals(isLocalAiEndpoint(url), false);
   }
 });

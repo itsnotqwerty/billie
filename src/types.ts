@@ -34,6 +34,10 @@ export interface BillDetail extends BillSummary {
   policyArea?: string;
   subjects: string[];
   actions: Action[];
+  completeness?: {
+    actions: "complete" | "partial" | "unavailable";
+    subjects: "complete" | "partial" | "unavailable";
+  };
 }
 
 export interface BillText {
@@ -41,4 +45,24 @@ export interface BillText {
   date?: string;
   sourceUrl: string;
   text: string;
+  originalLength?: number;
+  truncated?: boolean;
+}
+
+export function recordLimitations(bill: BillDetail): string[] {
+  if (!bill.completeness) return [];
+  return Object.entries(bill.completeness).flatMap(([field, state]) =>
+    state === "complete" ? [] : [`${field}: ${state}; do not infer absence from missing data.`]
+  );
+}
+
+export function textLimitations(text: BillText, maxChars = text.text.length): string[] {
+  const included = Math.min(text.text.length, maxChars);
+  return text.truncated || text.text.length > maxChars
+    ? [
+      `Text truncated: only the first ${included} characters of ${
+        text.originalLength ?? text.text.length
+      } are included; the remainder was omitted.`,
+    ]
+    : [];
 }

@@ -6,9 +6,9 @@ import type { Action, BillDetail, BillRef, BillSummary, BillText, Sponsor } from
 const BASE_URL = "https://api.congress.gov/v3";
 const PAGE_SIZE = 250;
 const MAX_SEARCH_PAGES = 6;
-const MAX_MEMBER_PAGES = 2;
-const MAX_SPONSOR_MATCHES = 2;
-const MAX_RESULTS = 200;
+const MAX_MEMBER_PAGES = 20;
+const MAX_SPONSOR_MATCHES = 20;
+const MAX_SPONSORED_PAGES = 20;
 const MAX_TEXT_LENGTH = 400_000;
 const MAX_RETRY_AFTER_429 = 1;
 const RETRY_DELAY_MS = 1_500;
@@ -157,6 +157,24 @@ export function parseBillDetail(
 export interface SearchOptions {
   congress?: number;
   type?: string | null;
+  offset?: number;
+}
+
+export interface SearchResult {
+  bills: BillSummary[];
+  scanned: number;
+  nextOffset?: number;
+  limitations: string[];
+}
+
+function hasNextPage(root: Record<string, unknown>, offset: number, length: number): boolean {
+  const pagination = root.pagination;
+  if (pagination && typeof pagination === "object") {
+    const page = pagination as Record<string, unknown>;
+    if (page.next) return true;
+    if (typeof page.count === "number") return offset + length < page.count;
+  }
+  return length === PAGE_SIZE;
 }
 
 export interface MemberSummary {
@@ -246,6 +264,15 @@ export class CongressClient {
     signal?: AbortSignal,
     type?: string | null,
   ): Promise<BillSummary[]> {
+    return (await this.listBillPage(congress, offset, signal, type)).bills;
+  }
+
+  private async listBillPage(
+    congress: number,
+    offset: number,
+    signal?: AbortSignal,
+    type?: string | null,
+  ): Promise<{ bills: BillSummary[]; more: boolean }> {
     const path = type ? `/bill/${congress}/${type}` : `/bill/${congress}`;
     const raw = await this.fetchJson(
       `${path}?limit=${PAGE_SIZE}&offset=${offset}&sort=updateDate+desc`,
@@ -255,7 +282,10 @@ export class CongressClient {
     if (!Array.isArray(bills)) {
       throw new CongressApiError("Congress.gov response did not include a bill list.");
     }
-    return bills.map(parseBillSummary);
+    return {
+      bills: bills.map(parseBillSummary),
+      more: hasNextPage(asRecord(raw), offset, bills.length),
+    };
   }
 
   /** Fetch a single bill's summary without its actions/subjects (used for direct number lookups). */
@@ -265,26 +295,46 @@ export class CongressClient {
   }
 
   /** Find current members whose name matches the query (client-side filtering). */
-  async searchMembers(query: string, signal?: AbortSignal): Promise<MemberSummary[]> {
+  async searchMembers(
+    query: string,
+    signal?: AbortSignal,
+    congress?: number,
+  ): Promise<MemberSummary[]> {
+    return (await this.scanMembers(query, signal, congress)).members;
+  }
+
+  private async scanMembers(
+    query: string,
+    signal?: AbortSignal,
+    congress?: number,
+  ): Promise<{ members: MemberSummary[]; complete: boolean }> {
     const tokens = query.toLowerCase().split(/\s+/).filter((token) => token.length > 0);
-    if (tokens.length === 0) return [];
+    if (tokens.length === 0) return { members: [], complete: true };
     const matches: MemberSummary[] = [];
+    let more = false;
     for (let page = 0; page < MAX_MEMBER_PAGES; page++) {
+      signal?.throwIfAborted();
+      const path = congress === undefined ? "/member" : `/member/congress/${congress}`;
       const raw = await this.fetchJson(
-        `/member?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&currentMember=true`,
+        `${path}?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}${
+          congress === undefined ? "&currentMember=true" : ""
+        }`,
         signal,
       );
       const members = asRecord(raw).members;
-      if (!Array.isArray(members)) break;
+      if (!Array.isArray(members)) {
+        throw new CongressApiError("Congress.gov response did not include a member list.");
+      }
       for (const item of members) {
         const member = parseMember(item);
         if (!member) continue;
         const haystack = member.name.toLowerCase();
         if (tokens.every((token) => haystack.includes(token))) matches.push(member);
       }
-      if (members.length < PAGE_SIZE) break;
+      more = hasNextPage(asRecord(raw), page * PAGE_SIZE, members.length);
+      if (!more) break;
     }
-    return matches;
+    return { members: matches, complete: !more };
   }
 
   /** Bills sponsored by a member, restricted to the given congress. */
@@ -293,25 +343,38 @@ export class CongressClient {
     congress: number,
     signal?: AbortSignal,
   ): Promise<BillSummary[]> {
-    const raw = await this.fetchJson(
-      `/member/${bioguideId}/sponsored-legislation?limit=${PAGE_SIZE}`,
-      signal,
-    );
-    const record = asRecord(raw);
-    const list = Array.isArray(record.sponsoredLegislation)
-      ? record.sponsoredLegislation
-      : Object.values(record).find((value) => Array.isArray(value));
-    if (!Array.isArray(list)) return [];
+    return (await this.scanSponsoredLegislation(bioguideId, congress, signal)).bills;
+  }
+
+  private async scanSponsoredLegislation(
+    bioguideId: string,
+    congress: number,
+    signal?: AbortSignal,
+  ): Promise<{ bills: BillSummary[]; complete: boolean }> {
     const summaries: BillSummary[] = [];
-    for (const item of list) {
-      try {
+    let more = false;
+    for (let page = 0; page < MAX_SPONSORED_PAGES; page++) {
+      signal?.throwIfAborted();
+      const record = asRecord(
+        await this.fetchJson(
+          `/member/${bioguideId}/sponsored-legislation?limit=${PAGE_SIZE}&offset=${
+            page * PAGE_SIZE
+          }`,
+          signal,
+        ),
+      );
+      const list = record.sponsoredLegislation;
+      if (!Array.isArray(list)) {
+        throw new CongressApiError("Congress.gov response did not include sponsored legislation.");
+      }
+      for (const item of list) {
         const summary = parseBillSummary(item);
         if (summary.congress === congress) summaries.push(summary);
-      } catch {
-        // Skip entries that do not match the expected bill shape.
       }
+      more = hasNextPage(record, page * PAGE_SIZE, list.length);
+      if (!more) break;
     }
-    return summaries;
+    return { bills: summaries, complete: !more };
   }
 
   /** Search by bill number/title (widened scan) merged with sponsor-name matches. A direct bill
@@ -321,34 +384,81 @@ export class CongressClient {
     signal?: AbortSignal,
     options: SearchOptions = {},
   ): Promise<BillSummary[]> {
+    return (await this.searchBillsWithCoverage(query, signal, options)).bills;
+  }
+
+  async searchBillsWithCoverage(
+    query: string,
+    signal?: AbortSignal,
+    options: SearchOptions = {},
+  ): Promise<SearchResult> {
     const congress = options.congress ?? currentCongress();
     const ref = detectBillRef(query);
     if (ref) {
-      return [await this.getBillSummary({ ...ref, congress }, signal)];
+      const bill = await this.getBillSummary({ ...ref, congress }, signal);
+      return {
+        bills: options.type && bill.type !== options.type ? [] : [bill],
+        scanned: 1,
+        limitations: [],
+      };
     }
     const tokens = query.toLowerCase().split(/\s+/).filter((token) => token.length > 0);
     const titleMatches: BillSummary[] = [];
+    const limitations: string[] = [];
+    const offset = options.offset ?? 0;
+    let scanned = 0;
+    let nextOffset: number | undefined;
     for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
-      const bills = await this.listBills(congress, page * PAGE_SIZE, signal, options.type);
+      signal?.throwIfAborted();
+      const pageOffset = offset + page * PAGE_SIZE;
+      const { bills, more } = await this.listBillPage(congress, pageOffset, signal, options.type);
+      scanned += bills.length;
       for (const bill of bills) {
         const haystack = `${bill.type}${bill.number} ${bill.title}`.toLowerCase();
         if (tokens.every((token) => haystack.includes(token))) titleMatches.push(bill);
       }
-      if (bills.length < PAGE_SIZE) break;
+      nextOffset = more ? pageOffset + PAGE_SIZE : undefined;
+      if (!more) break;
     }
     let sponsorMatches: BillSummary[] = [];
-    try {
-      const members = await this.searchMembers(query, signal);
-      const lists = await Promise.all(
-        members.slice(0, MAX_SPONSOR_MATCHES).map((member) =>
-          this.getSponsoredLegislation(member.bioguideId, congress, signal).catch(() => [])
-        ),
-      );
-      sponsorMatches = lists.flat();
-    } catch {
-      sponsorMatches = [];
+    if (offset === 0) {
+      try {
+        const { members, complete } = await this.scanMembers(query, signal, congress);
+        if (!complete) {
+          limitations.push("Member scan reached its safety limit; sponsor coverage is partial.");
+        }
+        if (members.length > MAX_SPONSOR_MATCHES) {
+          limitations.push(
+            `Only the first ${MAX_SPONSOR_MATCHES} matching sponsors were searched; refine the name.`,
+          );
+        }
+        for (const member of members.slice(0, MAX_SPONSOR_MATCHES)) {
+          try {
+            const result = await this.scanSponsoredLegislation(member.bioguideId, congress, signal);
+            sponsorMatches.push(...result.bills);
+            if (!result.complete) {
+              limitations.push(
+                `Sponsored legislation for ${member.name} reached its safety limit.`,
+              );
+            }
+          } catch {
+            signal?.throwIfAborted();
+            limitations.push(`Sponsored legislation for ${member.name} is unavailable.`);
+          }
+        }
+      } catch {
+        signal?.throwIfAborted();
+        limitations.push("Sponsor lookup unavailable; results include title matches only.");
+      }
     }
-    return dedupeBills([...titleMatches, ...sponsorMatches]).slice(0, MAX_RESULTS);
+    signal?.throwIfAborted();
+    if (options.type) sponsorMatches = sponsorMatches.filter((bill) => bill.type === options.type);
+    return {
+      bills: dedupeBills([...titleMatches, ...sponsorMatches]),
+      scanned,
+      nextOffset,
+      limitations,
+    };
   }
 
   /** Fetch a single bill with its recent actions and subjects. */
@@ -356,10 +466,40 @@ export class CongressClient {
     const path = `/bill/${ref.congress}/${ref.type}/${ref.number}`;
     const [bill, actions, subjects] = await Promise.all([
       this.fetchJson(path, signal),
-      this.fetchJson(`${path}/actions?limit=${PAGE_SIZE}`, signal).catch(() => ({ actions: [] })),
+      this.fetchJson(`${path}/actions?limit=${PAGE_SIZE}`, signal).catch(() => null),
       this.fetchJson(`${path}/subjects?limit=${PAGE_SIZE}`, signal).catch(() => null),
     ]);
-    return parseBillDetail(bill, actions, subjects);
+    signal?.throwIfAborted();
+    const actionsRoot = actions === null ? null : asRecord(actions);
+    const subjectsRoot = subjects === null ? null : asRecord(subjects);
+    const validActions = Array.isArray(actionsRoot?.actions);
+    const subjectData = subjectsRoot?.subjects;
+    const validSubjects = subjectData !== null && typeof subjectData === "object" &&
+      Array.isArray((subjectData as Record<string, unknown>).legislativeSubjects);
+    const detail = parseBillDetail(
+      bill,
+      validActions ? actions : { actions: [] },
+      validSubjects ? subjects : null,
+    );
+    const hasMore = (root: Record<string, unknown> | null, length: number): boolean => {
+      const pagination = root?.pagination;
+      if (!pagination || typeof pagination !== "object") return length === PAGE_SIZE;
+      const page = pagination as Record<string, unknown>;
+      return Boolean(page.next) || (typeof page.count === "number" && page.count > length);
+    };
+    detail.completeness = {
+      actions: !validActions
+        ? "unavailable"
+        : hasMore(actionsRoot, detail.actions.length)
+        ? "partial"
+        : "complete",
+      subjects: !validSubjects
+        ? "unavailable"
+        : hasMore(subjectsRoot, detail.subjects.length)
+        ? "partial"
+        : "complete",
+    };
+    return detail;
   }
 
   /** Fetch the most recent verbatim bill text (stripped to plain text) for manual/AI review. */
@@ -386,11 +526,14 @@ export class CongressClient {
       const url = preferred ? str(asRecord(preferred), "url") : "";
       if (!url) continue;
       const html = await this.fetchRawDocument(url, signal);
+      const text = stripHtml(html);
       return {
         versionType: str(vRecord, "type") || "Unknown version",
         date: str(vRecord, "date") || undefined,
         sourceUrl: url,
-        text: stripHtml(html).slice(0, MAX_TEXT_LENGTH),
+        text: text.slice(0, MAX_TEXT_LENGTH),
+        originalLength: text.length,
+        truncated: text.length > MAX_TEXT_LENGTH,
       };
     }
     throw new CongressApiError("No readable text format is available for this bill yet.");

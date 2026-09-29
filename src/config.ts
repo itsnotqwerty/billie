@@ -29,6 +29,16 @@ export const DEFAULT_AI_TIMEOUT_MS = 120_000;
 export const DEFAULT_AI_BASE_URL = "https://api.openai.com/v1";
 export const DEFAULT_AI_MODEL = "gpt-4o-mini";
 
+export function isLocalAiEndpoint(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function parentDir(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx > 0 ? path.slice(0, idx) : ".";
@@ -86,8 +96,11 @@ export async function saveCongressApiKey(key: string, env: EnvReader = Deno.env)
 /** Replace any configured secrets in diagnostic text with a mask. */
 export function redactSecrets(text: string, config: AppConfig): string {
   let out = text;
-  for (const secret of [config.congressApiKey, config.aiApiKey]) {
-    if (secret && secret.length >= 4) out = out.split(secret).join("***");
+  const secrets = [config.congressApiKey, config.aiApiKey]
+    .filter((secret): secret is string => Boolean(secret))
+    .sort((left, right) => right.length - left.length);
+  for (const secret of secrets) {
+    out = out.split(secret).join("***");
   }
   return out;
 }
@@ -95,6 +108,7 @@ export function redactSecrets(text: string, config: AppConfig): string {
 /** Display-safe rendering of a secret: last four characters only. */
 export function maskSecret(secret: string | null): string {
   if (!secret) return "(not set)";
+  if (secret.length <= 4) return "***";
   return `…${secret.slice(-4)}`;
 }
 

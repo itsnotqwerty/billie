@@ -1,7 +1,7 @@
 /** Metadata comparison between two bill details. */
 
 import { diffLines, type LineDiff } from "./diff.ts";
-import type { BillDetail } from "./types.ts";
+import { type BillDetail, recordLimitations } from "./types.ts";
 
 export interface ComparisonRow {
   label: string;
@@ -16,6 +16,7 @@ export interface BillComparison {
   rows: ComparisonRow[];
   /** Diff of the action lists, keyed on "date — text". */
   actions: LineDiff;
+  limitations: string[];
 }
 
 /** Short display label for a bill reference. */
@@ -52,9 +53,18 @@ export function compareBills(a: BillDetail, b: BillDetail): BillComparison {
     b: valueB,
     differs: valueA !== valueB,
   }));
+  const unavailable = a.completeness?.actions === "unavailable" ||
+    b.completeness?.actions === "unavailable";
   const actions = diffLines(
-    a.actions.map((action) => `${action.date} — ${action.text}`),
-    b.actions.map((action) => `${action.date} — ${action.text}`),
+    unavailable ? [] : a.actions.map((action) => `${action.date} — ${action.text}`),
+    unavailable ? [] : b.actions.map((action) => `${action.date} — ${action.text}`),
   );
-  return { a, b, rows, actions };
+  const limitations = [
+    ...recordLimitations(a).map((notice) => `Bill A ${notice}`),
+    ...recordLimitations(b).map((notice) => `Bill B ${notice}`),
+    ...(unavailable
+      ? ["Action comparison unavailable: one or both histories could not be retrieved."]
+      : []),
+  ];
+  return { a, b, rows, actions, limitations };
 }

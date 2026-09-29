@@ -1,6 +1,10 @@
 import {
+  analysisToMarkdown,
+  billTextToMarkdown,
+  billToMarkdown,
   comparisonAnalysisToMarkdown,
   comparisonTextToMarkdown,
+  comparisonToMarkdown,
   markdownToPlainText,
   markdownToTypst,
   serializeExport,
@@ -124,4 +128,46 @@ Deno.test("comparisonTextToMarkdown preserves both full text columns", () => {
   assertEquals(output.includes("| A two |  |"), true);
   assertEquals(output.includes("https://example.test/a"), true);
   assertEquals(output.includes("https://example.test/b"), true);
+});
+
+Deno.test("exports disclose unavailable records and truncated text", async () => {
+  const record = bill("hr", 1, "Incomplete record");
+  record.completeness = { actions: "unavailable", subjects: "partial" };
+  const comparison = compareBills(record, bill("s", 2, "Other record"));
+  const text = {
+    versionType: "Introduced",
+    sourceUrl: "https://example.test/text",
+    text: "excerpt",
+    originalLength: 100,
+    truncated: true,
+  };
+  const result = {
+    summary: "Summary",
+    keyProvisions: [],
+    affectedParties: [],
+    uncertainties: [],
+    sourceLimitations: ["Text truncated"],
+  };
+  assertEquals(billToMarkdown(record).includes("actions: unavailable"), true);
+  assertEquals(comparisonToMarkdown(comparison).includes("Action comparison unavailable"), true);
+  assertEquals(billTextToMarkdown(record, text).includes("first 7 characters of 100"), true);
+  assertEquals(
+    comparisonTextToMarkdown(comparison, text, text).includes("Bill B: Text truncated"),
+    true,
+  );
+  assertEquals(analysisToMarkdown(result, record, "test").includes("Text truncated"), true);
+  assertEquals(
+    comparisonAnalysisToMarkdown(result, comparison, "Why?", "test").includes("Text truncated"),
+    true,
+  );
+  const bundle = {
+    title: "Text",
+    data: text,
+    markdown: billTextToMarkdown(record, text),
+    text: "Text truncated",
+  };
+  for (const format of ["json", "xml", "csv", "html"] as const) {
+    const output = await serializeExport(bundle, format, "formatted") as string;
+    assertEquals(output.includes(format === "html" ? "Text truncated" : "truncated"), true);
+  }
 });

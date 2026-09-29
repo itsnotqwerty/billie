@@ -9,7 +9,7 @@ import {
   parseBillSummary,
   type RawFetchFn,
 } from "./congress.ts";
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 
 Deno.test("congressForYear maps years to congress numbers", () => {
   assertEquals(congressForYear(1789), 1);
@@ -234,7 +234,7 @@ Deno.test("searchBills merges title matches with sponsor matches and de-duplicat
         ),
       );
     }
-    if (url.pathname === "/v3/member") {
+    if (url.pathname === "/v3/member/congress/119") {
       return Promise.resolve(
         new Response(
           JSON.stringify({ members: [{ bioguideId: "S001", name: "Smith, Jane" }] }),
@@ -321,4 +321,133 @@ Deno.test("getBillText throws when no text versions are available", async () => 
     caught = error;
   }
   if (!(caught instanceof CongressApiError)) throw new Error("expected CongressApiError");
+});
+
+Deno.test("getBillDetail distinguishes failed, partial, and empty collections", async () => {
+  let fail = true;
+  const client = new CongressClient({
+    apiKey: "k",
+    timeoutMs: 1000,
+    fetchFn: (url) => {
+      if (url.pathname.endsWith("/actions")) {
+        return Promise.resolve(
+          fail
+            ? new Response("failure", { status: 503 })
+            : Response.json({ actions: [], pagination: { count: 0 } }),
+        );
+      }
+      if (url.pathname.endsWith("/subjects")) {
+        return Promise.resolve(Response.json({
+          subjects: { legislativeSubjects: [{ name: "Health" }] },
+          pagination: { count: 2, next: "next page" },
+        }));
+      }
+      return Promise.resolve(Response.json({ bill: summaryFixture }));
+    },
+  });
+  const ref = { congress: 119, type: "hr", number: 1 };
+  assertEquals((await client.getBillDetail(ref)).completeness, {
+    actions: "unavailable",
+    subjects: "partial",
+  });
+  fail = false;
+  assertEquals((await client.getBillDetail(ref)).completeness?.actions, "complete");
+  const controller = new AbortController();
+  controller.abort();
+  await assertRejects(() => client.getBillDetail(ref, controller.signal));
+});
+
+Deno.test("getBillText preserves original length and truncation metadata", async () => {
+  const client = new CongressClient({
+    apiKey: "k",
+    timeoutMs: 1000,
+    fetchFn: () =>
+      Promise.resolve(Response.json({
+        textVersions: [{
+          type: "Introduced",
+          formats: [{ type: "Formatted Text", url: "https://example.test/text" }],
+        }],
+      })),
+    rawFetchFn: () => Promise.resolve(new Response("x".repeat(400_001))),
+  });
+  const text = await client.getBillText({ congress: 119, type: "hr", number: 1 });
+  assertEquals(text.text.length, 400_000);
+  assertEquals(text.originalLength, 400_001);
+  assertEquals(text.truncated, true);
+});
+
+Deno.test("search coverage supports continuation and applies type filters to sponsor matches", async () => {
+  const client = new CongressClient({
+    apiKey: "k",
+    timeoutMs: 1000,
+    fetchFn: (url) => {
+      if (url.pathname.includes("/bill/")) {
+        const offset = Number(url.searchParams.get("offset"));
+        return Promise.resolve(Response.json({
+          bills: [{ ...summaryFixture, number: offset + 1 }],
+          pagination: { count: 1501 },
+        }));
+      }
+      if (url.pathname === "/v3/member/congress/118") {
+        assertEquals(url.searchParams.has("currentMember"), false);
+        return Promise.resolve(Response.json({ members: [{ bioguideId: "M1", name: "Example" }] }));
+      }
+      return Promise.resolve(
+        Response.json({ sponsoredLegislation: [{ ...summaryFixture, congress: 118, type: "S" }] }),
+      );
+    },
+  });
+  const first = await client.searchBillsWithCoverage("example", undefined, {
+    congress: 118,
+    type: "hr",
+  });
+  assertEquals(first.nextOffset, 1500);
+  assertEquals(first.bills.length, 6);
+  assertEquals(first.bills.every((bill) => bill.type === "hr"), true);
+  const next = await client.searchBillsWithCoverage("example", undefined, {
+    congress: 118,
+    offset: first.nextOffset,
+  });
+  assertEquals(next.nextOffset, undefined);
+  assertEquals(next.bills[0].number, 1501);
+});
+
+Deno.test("member and sponsored legislation lookup paginate beyond old limits", async () => {
+  const client = new CongressClient({
+    apiKey: "k",
+    timeoutMs: 1000,
+    fetchFn: (url) => {
+      const offset = Number(url.searchParams.get("offset"));
+      if (url.pathname.includes("sponsored-legislation")) {
+        return Promise.resolve(Response.json({
+          sponsoredLegislation: [{ ...summaryFixture, congress: offset === 0 ? 119 : 118 }],
+          pagination: { count: 251 },
+        }));
+      }
+      return Promise.resolve(Response.json({
+        members: [{ bioguideId: `M${offset}`, name: offset === 500 ? "Target Member" : "Other" }],
+        pagination: { count: 501 },
+      }));
+    },
+  });
+  assertEquals((await client.searchMembers("target", undefined, 118))[0].bioguideId, "M500");
+  assertEquals((await client.getSponsoredLegislation("M500", 118)).length, 1);
+});
+
+Deno.test("search reports unavailable sponsor coverage and propagates cancellation", async () => {
+  const controller = new AbortController();
+  const client = new CongressClient({
+    apiKey: "k",
+    timeoutMs: 1000,
+    fetchFn: (url) => {
+      if (url.pathname.includes("/member/")) {
+        return Promise.resolve(new Response("failure", { status: 503 }));
+      }
+      return Promise.resolve(Response.json({ bills: [] }));
+    },
+  });
+  const result = await client.searchBillsWithCoverage("example");
+  assertEquals(result.limitations.length, 1);
+  controller.abort();
+  await assertRejects(() => client.searchBillsWithCoverage("example", controller.signal));
 });

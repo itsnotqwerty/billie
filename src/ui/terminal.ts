@@ -1,5 +1,7 @@
 /** Minimal raw-mode terminal layer: key parsing and full-screen line rendering. */
 
+import { stripVTControlCharacters } from "node:util";
+
 export type Key =
   | { kind: "char"; value: string }
   | {
@@ -131,6 +133,88 @@ export function parseKeys(bytes: Uint8Array): Key[] {
   return keys;
 }
 
+export function sanitizeTerminalText(text: string): string {
+  return stripVTControlCharacters(text).replace(/\p{Cc}/gu, "");
+}
+
+export class KeyDecoder {
+  private readonly decoder = new TextDecoder();
+  private readonly encoder = new TextEncoder();
+  private pending = "";
+
+  get awaitingEscape(): boolean {
+    return this.pending.startsWith("\x1b");
+  }
+
+  push(bytes: Uint8Array): Key[] {
+    this.pending += this.decoder.decode(bytes, { stream: true });
+    return this.drain(false);
+  }
+
+  flushEscape(): Key[] {
+    return this.drain(true);
+  }
+
+  finish(): Key[] {
+    this.pending += this.decoder.decode();
+    return this.drain(true);
+  }
+
+  private drain(flush: boolean): Key[] {
+    let end = 0;
+    while (end < this.pending.length) {
+      if (this.pending[end] !== "\x1b") {
+        end++;
+        continue;
+      }
+      const remaining = this.pending.slice(end);
+      if (
+        !flush && (remaining.length === 1 || remaining === "\x1bO" ||
+          /^\[[0-?]*[ -/]*$/.test(remaining.slice(1)))
+      ) break;
+      const sequence = /^\[[0-?]*[ -/]*[@-~]/.exec(remaining.slice(1));
+      end += sequence ? sequence[0].length + 1 : (remaining.startsWith("\x1bO") ? 3 : 1);
+    }
+    const complete = this.pending.slice(0, end);
+    this.pending = this.pending.slice(end);
+    return parseKeys(this.encoder.encode(complete));
+  }
+}
+
+export async function* decodeKeyStream(
+  chunks: AsyncIterable<Uint8Array>,
+  escapeDelayMs = 40,
+): AsyncGenerator<Key> {
+  const decoder = new KeyDecoder();
+  const iterator = chunks[Symbol.asyncIterator]();
+  let next = iterator.next();
+  while (true) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let chunk: IteratorResult<Uint8Array> | null;
+    try {
+      chunk = decoder.awaitingEscape
+        ? await Promise.race([
+          next,
+          new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), escapeDelayMs);
+          }),
+        ])
+        : await next;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (chunk === null) {
+      yield* decoder.flushEscape();
+    } else if (chunk.done) {
+      yield* decoder.finish();
+      return;
+    } else {
+      yield* decoder.push(chunk.value);
+      next = iterator.next();
+    }
+  }
+}
+
 export function truncate(line: string, width: number): string {
   return [...line].slice(0, Math.max(0, width)).join("");
 }
@@ -154,6 +238,10 @@ export function wrap(text: string, width: number, indent = ""): string[] {
 
 export class Terminal {
   private readonly encoder = new TextEncoder();
+
+  size(): { columns: number; rows: number } {
+    return Deno.consoleSize();
+  }
 
   enter(): void {
     if (!Deno.stdin.isTerminal()) {
@@ -181,18 +269,22 @@ export class Terminal {
     const { columns, rows } = Deno.consoleSize();
     const out = ["\x1b[H"];
     for (let row = 0; row < rows; row++) {
-      out.push("\x1b[2K" + truncate(lines[row] ?? "", columns));
+      out.push("\x1b[2K" + truncate(sanitizeTerminalText(lines[row] ?? ""), columns));
       if (row < rows - 1) out.push("\r\n");
     }
     this.write(out.join(""));
   }
 
   async *keys(): AsyncGenerator<Key> {
+    yield* decodeKeyStream(this.chunks());
+  }
+
+  private async *chunks(): AsyncGenerator<Uint8Array> {
     const buffer = new Uint8Array(64);
     while (true) {
       const count = await Deno.stdin.read(buffer);
       if (count === null) return;
-      yield* parseKeys(buffer.subarray(0, count));
+      yield buffer.slice(0, count);
     }
   }
 }

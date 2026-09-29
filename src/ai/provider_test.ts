@@ -8,7 +8,7 @@ import {
 } from "./provider.ts";
 import type { BillDetail } from "../types.ts";
 import { compareBills } from "../compare.ts";
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 
 function makeBill(): BillDetail {
   return {
@@ -74,6 +74,69 @@ Deno.test("analysisPrompt explicitly identifies truncated bill text", () => {
   assertEquals(prompt.includes("first 100000 characters"), true);
   assertEquals(prompt.includes("remainder was omitted"), true);
   assertEquals(prompt.length < 101_000, true);
+});
+
+Deno.test("analysis preserves source limitations even when the model omits them", async () => {
+  const bill = makeBill();
+  bill.completeness = { actions: "unavailable", subjects: "complete" };
+  const text = {
+    versionType: "Introduced",
+    sourceUrl: "https://example.test/text",
+    text: "excerpt",
+    originalLength: 500_000,
+    truncated: true,
+  };
+  const prompt = analysisPrompt(bill, text);
+  assertEquals(prompt.includes("actions: unavailable"), true);
+  assertEquals(prompt.includes("first 7 characters of 500000"), true);
+  assertEquals(prompt.includes("complete available text"), false);
+  const provider = providerWith(() =>
+    Promise.resolve(Response.json({
+      choices: [{ message: { content: VALID_JSON } }],
+    }))
+  );
+  const result = await provider.analyze(bill, text);
+  assertEquals(result.sourceLimitations?.length, 2);
+  const comparison = compareBills(bill, makeBill());
+  assertEquals(comparison.actions.onlyB, []);
+  assertEquals(
+    comparison.limitations.some((notice) => notice.includes("Action comparison unavailable")),
+    true,
+  );
+  const compared = await provider.analyzeComparison(comparison, "Why?", text, text);
+  assertEquals(
+    compared.sourceLimitations?.some((notice) => notice.includes("Bill B: Text truncated")),
+    true,
+  );
+});
+
+Deno.test("keyless chat omits authorization and preserves error details", async () => {
+  let fail = false;
+  const provider = new OpenAiCompatProvider({
+    apiKey: "",
+    baseUrl: "http://localhost:11434/v1",
+    model: "local-model",
+    timeoutMs: 1000,
+    fetchFn: (_url, init) => {
+      assertEquals(Object.hasOwn(init.headers, "Authorization"), false);
+      return Promise.resolve(
+        fail
+          ? Response.json({ error: { message: "Model unavailable" } }, { status: 400 })
+          : Response.json({ choices: [{ message: { content: VALID_JSON } }] }),
+      );
+    },
+  });
+  const text = {
+    versionType: "Introduced",
+    sourceUrl: "https://example.test/text",
+    text: "Bill text",
+  };
+  assertEquals(
+    (await provider.analyze(makeBill(), text)).summary,
+    "A bill about wildfire response.",
+  );
+  fail = true;
+  await assertRejects(() => provider.analyze(makeBill(), text), AiError, "Model unavailable");
 });
 
 Deno.test("comparisonAnalysisPrompt includes both records, differences, and question", () => {

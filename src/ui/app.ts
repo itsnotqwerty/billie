@@ -7,7 +7,9 @@ import {
   type AppConfig,
   configPath,
   expandHomePath,
+  isLocalAiEndpoint,
   maskSecret,
+  redactSecrets,
   saveAiApiKey,
   saveAiBaseUrl,
   saveAiModel,
@@ -28,7 +30,13 @@ import {
   serializeExport,
   writeExport,
 } from "../export.ts";
-import type { BillDetail, BillSummary, BillText } from "../types.ts";
+import {
+  type BillDetail,
+  type BillSummary,
+  type BillText,
+  recordLimitations,
+  textLimitations,
+} from "../types.ts";
 import { pairColumns, sideBySide } from "./columns.ts";
 import { type FindHit, findInTexts, stepHit } from "./find.ts";
 import { type Key, Terminal, truncate, wrap } from "./terminal.ts";
@@ -89,10 +97,16 @@ const BILL_TYPE_FILTERS: ReadonlyArray<string | null> = [
   "sres",
 ];
 
+export interface AppDependencies {
+  terminal?: Pick<Terminal, "enter" | "exit" | "render" | "keys" | "size">;
+  client?: Pick<CongressClient, "searchBillsWithCoverage" | "getBillDetail" | "getBillText">;
+  provider?: Pick<OpenAiCompatProvider, "model" | "analyze" | "analyzeComparison">;
+}
+
 export class App {
-  private readonly term = new Terminal();
-  private client: CongressClient | null = null;
-  private provider: OpenAiCompatProvider | null = null;
+  private readonly term: NonNullable<AppDependencies["terminal"]>;
+  private client: AppDependencies["client"] | null = null;
+  private provider: AppDependencies["provider"] | null = null;
   private view: ViewName = "menu";
   private history: ViewName[] = [];
   private status = "";
@@ -116,6 +130,9 @@ export class App {
   private filterType: string | null = null;
   private filterCongress: number = currentCongress();
   private lastQuery = "";
+  private searchScanned = 0;
+  private searchNextOffset: number | undefined;
+  private searchLimitations: string[] = [];
   private scroll = 0;
   private findQuery = "";
   private findHits: FindHit[] = [];
@@ -123,6 +140,7 @@ export class App {
   private pendingFindQuery: string | null = null;
   private loading: string | null = null;
   private pending: AbortController | null = null;
+  private textRequests = new Map<string, AbortController>();
   private running = false;
   private exportContext: ExportContext | null = null;
   private exportType: ExportFileType = "markdown";
@@ -130,25 +148,27 @@ export class App {
   private exportScope: ExportScope = "document";
   private exportMenuSelection = 0;
 
-  constructor(private config: AppConfig) {
+  constructor(private config: AppConfig, private readonly dependencies: AppDependencies = {}) {
+    this.term = dependencies.terminal ?? new Terminal();
     this.resetClient();
   }
 
   private resetClient(): void {
-    this.client = this.config.congressApiKey
+    this.client = this.dependencies.client ?? (this.config.congressApiKey
       ? new CongressClient({
         apiKey: this.config.congressApiKey,
         timeoutMs: this.config.requestTimeoutMs,
       })
-      : null;
-    this.provider = this.config.aiApiKey
-      ? new OpenAiCompatProvider({
-        apiKey: this.config.aiApiKey,
-        model: this.config.aiModel,
-        baseUrl: this.config.aiBaseUrl,
-        timeoutMs: this.config.aiTimeoutMs,
-      })
-      : null;
+      : null);
+    this.provider = this.dependencies.provider ??
+      ((this.config.aiApiKey || isLocalAiEndpoint(this.config.aiBaseUrl))
+        ? new OpenAiCompatProvider({
+          apiKey: this.config.aiApiKey ?? "",
+          model: this.config.aiModel,
+          baseUrl: this.config.aiBaseUrl,
+          timeoutMs: this.config.aiTimeoutMs,
+        })
+        : null);
   }
 
   async run(): Promise<void> {
@@ -157,8 +177,8 @@ export class App {
     this.status = this.client
       ? "Welcome to Billie. Press h for help."
       : "No Congress.gov API key configured — press i to add one.";
-    this.render();
     try {
+      this.render();
       for await (const key of this.term.keys()) {
         this.handleKey(key);
         if (!this.running) break;
@@ -166,13 +186,33 @@ export class App {
       }
     } finally {
       this.running = false;
-      this.pending?.abort();
+      this.cancelRequests();
       this.term.exit();
     }
   }
 
   private quit(): void {
     this.running = false;
+    this.cancelRequests();
+  }
+
+  private cancelRequests(): void {
+    this.pending?.abort();
+    this.pending = null;
+    this.loading = null;
+    for (const controller of this.textRequests.values()) controller.abort();
+    this.textRequests.clear();
+  }
+
+  private ownsRequest(controller: AbortController): boolean {
+    return this.running && this.pending === controller && !controller.signal.aborted;
+  }
+
+  private finishRequest(controller: AbortController): void {
+    if (!this.ownsRequest(controller)) return;
+    this.pending = null;
+    this.loading = null;
+    this.render();
   }
 
   private pushView(view: ViewName): void {
@@ -181,9 +221,8 @@ export class App {
   }
 
   private back(): void {
-    if (this.pending && this.loading) {
-      this.pending.abort();
-      this.loading = null;
+    if ((this.pending && this.loading) || this.textRequests.size > 0) {
+      this.cancelRequests();
       this.status = "Cancelled.";
       return;
     }
@@ -196,9 +235,13 @@ export class App {
   }
 
   private reset(): void {
+    this.cancelRequests();
     this.history = [];
     this.view = "menu";
     this.results = [];
+    this.searchScanned = 0;
+    this.searchNextOffset = undefined;
+    this.searchLimitations = [];
     this.selected = 0;
     this.detail = null;
     this.detailMode = "overview";
@@ -346,6 +389,11 @@ export class App {
       case "t":
         this.cycleTypeFilter();
         break;
+      case "l":
+        if (this.view === "results" && this.searchNextOffset !== undefined) {
+          this.startSearch(this.lastQuery, true);
+        }
+        break;
       case "x":
         this.toggleTextMode();
         break;
@@ -365,7 +413,7 @@ export class App {
   }
 
   private pageSize(): number {
-    const { rows } = Deno.consoleSize();
+    const { rows } = this.term.size();
     return Math.max(1, rows - 8);
   }
 
@@ -399,7 +447,7 @@ export class App {
       return;
     }
     this.scroll = 0;
-    const { columns } = Deno.consoleSize();
+    const { columns } = this.term.size();
     const lines = this.viewLines(Math.max(40, columns - 2));
     this.scroll = Math.max(0, lines.length - this.pageSize());
   }
@@ -455,7 +503,7 @@ export class App {
     provider
       .listModels(controller.signal)
       .then((models) => {
-        if (controller.signal.aborted || !this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         if (models.length === 0) {
           this.status = "Endpoint advertised no models.";
@@ -468,14 +516,14 @@ export class App {
         this.status = "Select a model, Enter to save, Esc to cancel.";
       })
       .catch((error: Error) => {
-        if (!this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.status = controller.signal.aborted
           ? "Cancelled."
           : `Model detection failed: ${error.message}`;
       })
       .finally(() => {
-        if (this.running) this.render();
+        this.finishRequest(controller);
       });
   }
 
@@ -594,7 +642,7 @@ export class App {
       this.back();
       return;
     }
-    if (value.length === 0) {
+    if (value.length === 0 && field !== "congressApiKey" && field !== "aiApiKey") {
       this.status = "No value entered.";
       this.back();
       return;
@@ -727,18 +775,28 @@ export class App {
   }
 
   private findScreenRow(hit: FindHit): number {
-    const width = Math.max(40, Deno.consoleSize().columns - 2);
+    const width = Math.max(40, this.term.size().columns - 2);
     if (this.view === "detail" && this.detail) {
       const text = this.billTexts.get(this.refKey(this.detail));
       const sourceLines = text?.text.split("\n") ?? [];
       const headerRows = 1 + wrap(`Source: ${text?.sourceUrl ?? ""}`, width, "  ").length + 1;
-      let row = headerRows;
+      let row = headerRows +
+        (text ? textLimitations(text).flatMap((notice) => wrap(notice, width, "  ")).length : 0);
       for (let i = 0; i < hit.line && i < sourceLines.length; i++) {
         row += Math.max(1, wrap(sourceLines[i], width, "  ").length);
       }
       return row;
     }
-    return 3 + hit.line;
+    const texts = this.comparison
+      ? [
+        this.billTexts.get(this.refKey(this.comparison.a)),
+        this.billTexts.get(this.refKey(this.comparison.b)),
+      ]
+      : [];
+    return 3 +
+      texts.flatMap((text) => text ? textLimitations(text) : []).flatMap((notice) =>
+        wrap(notice, width, "  ")
+      ).length + hit.line;
   }
 
   private stepFind(delta: number): void {
@@ -759,7 +817,7 @@ export class App {
 
   // ----- search -----
 
-  private startSearch(query: string): void {
+  private startSearch(query: string, append = false): void {
     if (!this.client) {
       this.status = "No Congress.gov API key configured — press i to add one.";
       return;
@@ -771,31 +829,37 @@ export class App {
     const filterLabel = this.filterType ? ` [${this.filterType.toUpperCase()}]` : "";
     this.loading = `Searching “${query}” in the ${this.filterCongress}th Congress${filterLabel}…`;
     this.render();
-    this.client.searchBills(query, controller.signal, {
+    this.client.searchBillsWithCoverage(query, controller.signal, {
       congress: this.filterCongress,
       type: this.filterType,
+      offset: append ? this.searchNextOffset : 0,
     })
-      .then((bills) => {
-        if (controller.signal.aborted || !this.running) return;
+      .then((result) => {
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
-        if (bills.length === 0) {
-          this.status =
-            "No matching bills found. Try different keywords, a bill number like “hr5676”, " +
-            "or part of a sponsor’s name.";
+        const merged = new Map(
+          (append ? this.results : []).map((bill) => [this.refKey(bill), bill]),
+        );
+        for (const bill of result.bills) merged.set(this.refKey(bill), bill);
+        this.results = [...merged.values()];
+        this.searchScanned = (append ? this.searchScanned : 0) + result.scanned;
+        this.searchNextOffset = result.nextOffset;
+        this.searchLimitations = [...(append ? this.searchLimitations : []), ...result.limitations];
+        if (!append) this.selected = 0;
+        if (this.view !== "results") this.pushView("results");
+        if (this.results.length === 0) {
+          this.status = "No matching bills in the searched records.";
           return;
         }
-        this.results = bills;
-        this.selected = 0;
-        if (this.view !== "results") this.pushView("results");
-        this.status = `${bills.length} result(s).`;
+        this.status = `${this.results.length} result(s).`;
       })
       .catch((error: Error) => {
-        if (!this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.status = controller.signal.aborted ? "Cancelled." : `Error: ${error.message}`;
       })
       .finally(() => {
-        if (this.running) this.render();
+        this.finishRequest(controller);
       });
   }
 
@@ -853,7 +917,7 @@ export class App {
       this.client.getBillDetail(b, controller.signal),
     ])
       .then(([detailA, detailB]) => {
-        if (controller.signal.aborted || !this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.comparison = compareBills(detailA, detailB);
         this.compareMode = "overview";
@@ -862,12 +926,12 @@ export class App {
         this.status = "Comparison ready — x side-by-side text · w export.";
       })
       .catch((error: Error) => {
-        if (!this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.status = controller.signal.aborted ? "Cancelled." : `Error: ${error.message}`;
       })
       .finally(() => {
-        if (this.running) this.render();
+        this.finishRequest(controller);
       });
   }
 
@@ -876,7 +940,7 @@ export class App {
   private startAnalysis(): void {
     if (this.view === "compare" && this.comparison) {
       if (!this.provider) {
-        this.status = "No AI provider configured — press i to add an AI API key.";
+        this.status = "No AI provider configured — press i to set a key or a local endpoint.";
         return;
       }
       this.input = "How do these bills differ?";
@@ -888,7 +952,7 @@ export class App {
       return;
     }
     if (!this.provider) {
-      this.status = "No AI provider configured — press i to add an AI API key.";
+      this.status = "No AI provider configured — press i to set a key or a local endpoint.";
       return;
     }
     const bill = this.detail;
@@ -906,7 +970,7 @@ export class App {
       : Promise.reject(new Error("Congress.gov client is unavailable."));
     textRequest
       .then((billText) => {
-        if (controller.signal.aborted || !this.running) return null;
+        if (!this.ownsRequest(controller)) return null;
         this.billTexts.set(this.refKey(bill), billText);
         this.loading = `Analyzing ${billLabel(bill)} with ${provider.model}…`;
         this.render();
@@ -914,7 +978,7 @@ export class App {
       })
       .then((result) => {
         if (!result) return;
-        if (controller.signal.aborted || !this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.analysis = { result, model: provider.model };
         this.analysisBill = bill;
@@ -925,14 +989,14 @@ export class App {
         this.status = "Generated interpretation, not authoritative — press w to export.";
       })
       .catch((error: Error) => {
-        if (!this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.status = controller.signal.aborted
           ? "Cancelled."
           : `Analysis failed: ${error.message}`;
       })
       .finally(() => {
-        if (this.running) this.render();
+        this.finishRequest(controller);
       });
   }
 
@@ -953,7 +1017,7 @@ export class App {
     };
     Promise.all([getText(comparison.a), getText(comparison.b)])
       .then(([textA, textB]) => {
-        if (controller.signal.aborted || !this.running) return null;
+        if (!this.ownsRequest(controller)) return null;
         this.billTexts.set(this.refKey(comparison.a), textA);
         this.billTexts.set(this.refKey(comparison.b), textB);
         this.loading = `Comparing both bill texts with ${provider.model}…`;
@@ -962,7 +1026,7 @@ export class App {
       })
       .then((result) => {
         if (!result) return;
-        if (controller.signal.aborted || !this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.analysis = { result, model: provider.model };
         this.analysisBill = null;
@@ -974,14 +1038,14 @@ export class App {
           "Generated comparison using both bill texts and record history — press w to export.";
       })
       .catch((error: Error) => {
-        if (!this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.status = controller.signal.aborted
           ? "Cancelled."
           : `Comparison analysis failed: ${error.message}`;
       })
       .finally(() => {
-        if (this.running) this.render();
+        this.finishRequest(controller);
       });
   }
 
@@ -996,17 +1060,17 @@ export class App {
     this.render();
     this.client.getBillDetail(summary, controller.signal)
       .then((detail) => {
-        if (controller.signal.aborted || !this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.setDetail(detail);
       })
       .catch((error: Error) => {
-        if (!this.running) return;
+        if (!this.ownsRequest(controller)) return;
         this.loading = null;
         this.status = controller.signal.aborted ? "Cancelled." : `Error: ${error.message}`;
       })
       .finally(() => {
-        if (this.running) this.render();
+        this.finishRequest(controller);
       });
   }
 
@@ -1059,8 +1123,10 @@ export class App {
 
   private ensureBillText(bill: BillDetail): void {
     const key = this.refKey(bill);
-    if (this.billTexts.has(key) || this.textErrors.has(key) || !this.client) return;
+    if (this.billTexts.has(key) || this.textRequests.has(key) || !this.client) return;
+    this.textErrors.delete(key);
     const controller = new AbortController();
+    this.textRequests.set(key, controller);
     this.client.getBillText(bill, controller.signal)
       .then((text) => {
         if (controller.signal.aborted || !this.running) return;
@@ -1079,6 +1145,8 @@ export class App {
         this.status = `Text unavailable for ${billLabel(bill)}: ${error.message}`;
       })
       .finally(() => {
+        if (this.textRequests.get(key) !== controller) return;
+        this.textRequests.delete(key);
         if (this.running) this.render();
       });
   }
@@ -1105,6 +1173,8 @@ export class App {
             date: text.date,
             sourceUrl: text.sourceUrl,
             text: text.text,
+            originalLength: text.originalLength,
+            truncated: text.truncated,
           },
           markdown,
           text: markdownToPlainText(markdown),
@@ -1141,6 +1211,8 @@ export class App {
               date: textA.date,
               sourceUrl: textA.sourceUrl,
               text: textA.text,
+              originalLength: textA.originalLength,
+              truncated: textA.truncated,
             },
             b: {
               bill: comparison.b,
@@ -1148,6 +1220,8 @@ export class App {
               date: textB.date,
               sourceUrl: textB.sourceUrl,
               text: textB.text,
+              originalLength: textB.originalLength,
+              truncated: textB.truncated,
             },
           },
           markdown,
@@ -1215,7 +1289,7 @@ export class App {
       this.status = "Nothing to export — open a bill, comparison, or analysis first.";
       return;
     }
-    const width = Math.max(40, Deno.consoleSize().columns - 2);
+    const width = Math.max(40, this.term.size().columns - 2);
     const visibleLines = this.viewLines(width).slice(0, this.pageSize())
       .map((line) => line.replace(/^\s{2}/, ""));
     this.exportContext = { bundle, baseName, visibleLines };
@@ -1258,7 +1332,7 @@ export class App {
   // ----- rendering -----
 
   render(): void {
-    const { columns } = Deno.consoleSize();
+    const { columns } = this.term.size();
     const width = Math.max(40, columns - 2);
     const lines: string[] = [];
     lines.push(" BILLIE — Congress.gov legislative explorer");
@@ -1267,7 +1341,7 @@ export class App {
     lines.push(...this.viewLines(width));
     lines.push("", " " + "-".repeat(Math.min(width, 60)));
     lines.push(` ${this.loading ?? this.status}`);
-    this.term.render(lines);
+    this.term.render(lines.map((line) => redactSecrets(line, this.config)));
   }
 
   private viewLines(width: number): string[] {
@@ -1303,12 +1377,15 @@ export class App {
         ];
       case "configEdit": {
         const label = this.configField ? CONFIG_FIELD_LABELS[this.configField] : "value";
+        const value = this.configField === "congressApiKey" || this.configField === "aiApiKey"
+          ? "*".repeat([...this.input].length)
+          : this.input;
         return [
           `  Edit ${label}`,
           "",
-          "  Enter to save, Esc to cancel.",
+          "  Enter to save (blank clears API keys), Esc to cancel.",
           "",
-          `  > ${this.input}█`,
+          `  > ${value}█`,
         ];
       }
       case "modelPick": {
@@ -1367,7 +1444,7 @@ export class App {
         return [
           "  Ask AI how these bills differ",
           "",
-          "  The answer uses available record metadata and action history, not full bill text.",
+          "  The answer uses available records and bounded excerpts of both bill texts.",
           "  Enter your question below, press Enter to analyze, or Esc to cancel.",
           "",
           `  > ${this.input}█`,
@@ -1399,6 +1476,7 @@ export class App {
           "  In compare mode, a asks about metadata and action differences",
           "  Space/m  Mark for compare    x  Overview / text (side-by-side in compare)",
           "  t  Cycle bill-type filter    < >  Change congress",
+          "  l  Load more title-search results",
           "  ←/,  Previous match           →/.  Next match",
           "  n / N  Next / previous match in displayed text",
           "  PgUp/PgDn or f/v  Page       b  Page up · g/G or Home/End jump to edges",
@@ -1416,9 +1494,21 @@ export class App {
       `  Results — ${this.filterCongress}th Congress${filterLabel} (${this.marked.size}/2 marked)`,
       "  ↑/↓ or j/k move · Enter/v open · Space/m mark · c compare · t type · </> congress · " +
       "s new search",
+      `  ${this.searchScanned} bill records scanned. ${
+        this.searchNextOffset !== undefined
+          ? "Partial title coverage: l loads more."
+          : "Title scan complete."
+      }`,
+      ...this.searchLimitations.flatMap((notice) => wrap(notice, width, "  ")),
       "",
     ];
-    for (const [index, bill] of this.results.entries()) {
+    const size = Math.max(1, this.pageSize() - lines.length);
+    const start = Math.max(
+      0,
+      Math.min(this.selected - Math.floor(size / 2), this.results.length - size),
+    );
+    for (const [position, bill] of this.results.slice(start, start + size).entries()) {
+      const index = start + position;
       const cursor = index === this.selected ? ">" : " ";
       const mark = this.marked.has(this.refKey(bill)) ? "*" : " ";
       const label = `${bill.type.toUpperCase()}${bill.number}`;
@@ -1437,6 +1527,7 @@ export class App {
     const lines: string[] = [];
     lines.push(`  ${detail.type.toUpperCase()} ${detail.number} — ${detail.congress}th Congress`);
     lines.push(...wrap(detail.title, width, "  "));
+    lines.push(...recordLimitations(detail).flatMap((notice) => wrap(notice, width, "  ")));
     lines.push("");
     lines.push(`  Introduced: ${detail.introducedDate ?? "unavailable"}`);
     lines.push(
@@ -1483,7 +1574,10 @@ export class App {
 
   private billTextLines(detail: BillDetail, width: number): string[] {
     const cached = this.billTexts.get(this.refKey(detail));
-    if (!cached) return ["  Loading verbatim text… (press x to return to overview)"];
+    if (!cached) {
+      const error = this.textErrors.get(this.refKey(detail));
+      return [error ? `  Text unavailable: ${error}` : "  Loading verbatim text…"];
+    }
     const active = this.findHits[this.findIndex];
     const body = cached.text.split("\n").flatMap((line, index) => {
       const wrapped = wrap(line, width, "  ");
@@ -1495,6 +1589,7 @@ export class App {
     const lines = [
       `  ${billLabel(detail)} — ${cached.versionType}${cached.date ? ` (${cached.date})` : ""}`,
       ...wrap(`Source: ${cached.sourceUrl}`, width, "  "),
+      ...textLimitations(cached).flatMap((notice) => wrap(notice, width, "  ")),
       "",
       ...body,
     ];
@@ -1508,6 +1603,7 @@ export class App {
     const labelA = billLabel(comparison.a);
     const labelB = billLabel(comparison.b);
     const lines = [`  Comparing ${labelA} vs ${labelB}`, ""];
+    lines.push(...comparison.limitations.flatMap((notice) => wrap(notice, width, "  ")));
     for (const row of comparison.rows) {
       if (row.differs) {
         lines.push(...wrap(`≠ ${row.label}:`, width, "  "));
@@ -1549,6 +1645,9 @@ export class App {
     return [
       header,
       hint,
+      ...[textA, textB].flatMap((text) => text ? textLimitations(text) : []).flatMap((notice) =>
+        wrap(notice, width, "  ")
+      ),
       pairColumns("-".repeat(width), "-".repeat(width), width),
       ...sideBySide(
         this.textColumn(comparison.a, textA, 0),
@@ -1587,7 +1686,7 @@ export class App {
       ...(comparison ? wrap(`Question: ${this.analysisQuestion}`, width, "  ") : []),
       ...(comparison
         ? wrap(
-          "Based on record metadata and action history; full bill text was not supplied.",
+          "Based on available records and bounded excerpts of both bill texts.",
           width,
           "  ",
         )
@@ -1603,6 +1702,7 @@ export class App {
     section(comparison ? "Key differences" : "Key provisions", analysis.result.keyProvisions);
     section("Affected parties", analysis.result.affectedParties);
     section("Uncertainties", analysis.result.uncertainties);
+    section("Source limitations", analysis.result.sourceLimitations ?? []);
     if (comparison) {
       lines.push("", ...wrap(`Source A: ${comparison.a.url || "Congress.gov API"}`, width, "  "));
       lines.push(...wrap(`Source B: ${comparison.b.url || "Congress.gov API"}`, width, "  "));

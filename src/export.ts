@@ -2,7 +2,13 @@
 
 import type { AnalysisResult } from "./ai/provider.ts";
 import { type BillComparison, billLabel } from "./compare.ts";
-import type { BillDetail, BillText } from "./types.ts";
+import { type BillDetail, type BillText, recordLimitations, textLimitations } from "./types.ts";
+
+function limitationsToMarkdown(notices: string[]): string[] {
+  return notices.length > 0
+    ? ["", "## Source limitations", "", ...notices.map((notice) => `- ${notice}`), ""]
+    : [];
+}
 
 /** Render a bill detail as a self-contained Markdown document. */
 export function billToMarkdown(bill: BillDetail, retrievedAt: Date = new Date()): string {
@@ -11,6 +17,7 @@ export function billToMarkdown(bill: BillDetail, retrievedAt: Date = new Date())
     `# ${label}`,
     "",
     bill.title,
+    ...limitationsToMarkdown(recordLimitations(bill)),
     "",
     "## Metadata",
     "",
@@ -71,6 +78,7 @@ export function comparisonToMarkdown(
   const labelB = billLabel(comparison.b);
   const lines: string[] = [
     `# Comparison: ${labelA} vs ${labelB}`,
+    ...limitationsToMarkdown(comparison.limitations),
     "",
     "| Field | A | B |",
     "| --- | --- | --- |",
@@ -131,6 +139,7 @@ export function analysisToMarkdown(
   section("Key provisions", result.keyProvisions);
   section("Affected parties", result.affectedParties);
   section("Uncertainties", result.uncertainties);
+  lines.push(...limitationsToMarkdown(result.sourceLimitations ?? recordLimitations(bill)));
   lines.push(
     "",
     "## Provenance",
@@ -171,6 +180,7 @@ export function comparisonAnalysisToMarkdown(
   section("Key differences", result.keyProvisions);
   section("Affected parties", result.affectedParties);
   section("Uncertainties", result.uncertainties);
+  lines.push(...limitationsToMarkdown(result.sourceLimitations ?? comparison.limitations));
   lines.push(
     "",
     "## Provenance",
@@ -195,6 +205,7 @@ export function billTextToMarkdown(
     `# ${label} — Verbatim text`,
     "",
     `Version: ${billText.versionType}${billText.date ? ` (${billText.date})` : ""}`,
+    ...limitationsToMarkdown(textLimitations(billText)),
     "",
     "## Provenance",
     "",
@@ -219,6 +230,10 @@ export function comparisonTextToMarkdown(
   const labelB = billLabel(comparison.b);
   const lines = [
     `# Side-by-side text: ${labelA} vs ${labelB}`,
+    ...limitationsToMarkdown([
+      ...textLimitations(textA).map((notice) => `Bill A: ${notice}`),
+      ...textLimitations(textB).map((notice) => `Bill B: ${notice}`),
+    ]),
     "",
     `- ${labelA}: ${textA.versionType}${textA.date ? ` (${textA.date})` : ""}`,
     `- Source: ${textA.sourceUrl}`,
