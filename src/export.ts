@@ -1,6 +1,7 @@
 /** Native serializers for legislation records, comparisons, and analysis. */
 
 import type { AnalysisResult } from "./ai/provider.ts";
+import { Lexer, type Token, type Tokens } from "marked";
 import { type BillComparison, billLabel } from "./compare.ts";
 import { type BillDetail, type BillText, recordLimitations, textLimitations } from "./types.ts";
 
@@ -330,6 +331,35 @@ function escapeHtml(value: string): string {
     })[char]!);
 }
 
+function inlineHtml(markdown: string): string {
+  const render = (tokens: Token[] = []): string =>
+    tokens.map((token): string => {
+      switch (token.type) {
+        case "strong":
+          return `<strong>${render(token.tokens)}</strong>`;
+        case "em":
+          return `<em>${render(token.tokens)}</em>`;
+        case "del":
+          return `<del>${render(token.tokens)}</del>`;
+        case "codespan":
+          return `<code>${escapeHtml(token.text)}</code>`;
+        case "br":
+          return "<br>";
+        case "link":
+          return render(token.tokens);
+        case "image":
+          return escapeHtml(token.text);
+        case "text":
+          return token.tokens ? render(token.tokens) : escapeHtml(token.text);
+        case "escape":
+          return escapeHtml(token.text);
+        default:
+          return escapeHtml(token.raw);
+      }
+    }).join("");
+  return render(Lexer.lexInline(markdown));
+}
+
 function markdownToHtml(markdown: string): string {
   const sourceLines = markdown.split("\n");
   const outputLines: string[] = [];
@@ -353,19 +383,19 @@ function markdownToHtml(markdown: string): string {
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       const level = heading[1].length;
-      outputLines.push(`<h${level}>${escapeHtml(heading[2])}</h${level}>`);
+      outputLines.push(`<h${level}>${inlineHtml(heading[2])}</h${level}>`);
       continue;
     }
     const item = /^\s*[-*+]\s+(.*)$/.exec(line);
     if (item) {
-      outputLines.push(`<p class="list-item">${escapeHtml(item[1])}</p>`);
+      outputLines.push(`<p class="list-item">${inlineHtml(item[1])}</p>`);
       continue;
     }
     if (!line.trim()) {
       outputLines.push("");
       continue;
     }
-    outputLines.push(`<p>${escapeHtml(line)}</p>`);
+    outputLines.push(`<p>${inlineHtml(line)}</p>`);
   }
   return outputLines.join("\n");
 }
@@ -401,11 +431,11 @@ function isTableSeparator(cells: string[]): boolean {
 function htmlTable(rows: string[][]): string {
   const [header, ...body] = rows;
   const head = `<thead><tr>${
-    header.map((cell) => `<th>${escapeHtml(cell.replaceAll("\u0000", "|"))}</th>`).join("")
+    header.map((cell) => `<th>${inlineHtml(cell.replaceAll("\u0000", "|"))}</th>`).join("")
   }</tr></thead>`;
   const bodyRows = body.map((row) =>
     `<tr>${
-      row.map((cell) => `<td>${escapeHtml(cell.replaceAll("\u0000", "|"))}</td>`).join("")
+      row.map((cell) => `<td>${inlineHtml(cell.replaceAll("\u0000", "|"))}</td>`).join("")
     }</tr>`
   );
   return bodyRows.length > 0
@@ -417,7 +447,8 @@ function typstTable(rows: string[][]): string {
   const columnCount = Math.max(...rows.map((row) => row.length));
   const cells = rows.flatMap((row, rowIndex) =>
     Array.from({ length: columnCount }, (_, columnIndex) => {
-      const text = markdownToPlainText(row[columnIndex] ?? "").replaceAll("\u0000", "|").trim();
+      const text = markdownToPlainText((row[columnIndex] ?? "").replaceAll("|", "\u0000"))
+        .replaceAll("\u0000", "|").trim();
       const content = `#text(${JSON.stringify(text)})`;
       return rowIndex === 0 ? `[#strong[${content}]]` : `[${content}]`;
     })
@@ -431,37 +462,38 @@ function typstTable(rows: string[][]): string {
 
 /** Convert Markdown blocks into escaped Typst markup, preserving table structure. */
 export function markdownToTypst(markdown: string, formatted: boolean): string {
-  const sourceLines = markdown.split("\n");
-  const outputLines: string[] = [];
-  for (let index = 0; index < sourceLines.length;) {
-    const header = parseTableRow(sourceLines[index]);
-    const separator = index + 1 < sourceLines.length ? parseTableRow(sourceLines[index + 1]) : null;
-    if (header && separator && isTableSeparator(separator)) {
-      const rows = [header];
-      index += 2;
-      while (index < sourceLines.length) {
-        const row = parseTableRow(sourceLines[index]);
-        if (!row) break;
-        if (!isTableSeparator(row)) rows.push(row);
-        index++;
+  const text = (value: string): string =>
+    `#text(${JSON.stringify(markdownToPlainText(value).trimEnd())})`;
+  const blocks = (tokens: Token[] = []): string =>
+    tokens.map((token): string => {
+      switch (token.type) {
+        case "space":
+          return "";
+        case "table":
+          return typstTable([
+            token.header.map((cell: Tokens.TableCell) => cell.text),
+            ...token.rows.map((row: Tokens.TableCell[]) => row.map((cell) => cell.text)),
+          ]);
+        case "heading":
+          return formatted
+            ? `#heading(level: ${token.depth})[${text(token.text)}]`
+            : text(token.text);
+        case "list": {
+          const items = token.items.map((item: Tokens.ListItem) => blocks(item.tokens));
+          if (!formatted) return items.join("\n\n");
+          const kind = token.ordered ? `enum(start: ${token.start},` : "list(";
+          return `#${kind}\n${items.map((item: string) => `[${item}],`).join("\n")}\n)`;
+        }
+        case "blockquote":
+          return blocks(token.tokens);
+        case "code":
+          return `#text(${JSON.stringify(token.text)})`;
+        default:
+          return text("text" in token ? String(token.text) : token.raw);
       }
-      outputLines.push(typstTable(rows), "");
-      continue;
-    }
-
-    const line = sourceLines[index++];
-    const heading = formatted ? /^(#{1,6})\s+(.*)$/.exec(line) : null;
-    if (heading) {
-      const title = markdownToPlainText(heading[2]).trim();
-      outputLines.push(
-        `#heading(level: ${heading[1].length})[#text(${JSON.stringify(title)})]`,
-      );
-    } else {
-      const text = markdownToPlainText(line).trimEnd();
-      outputLines.push(text ? `#text(${JSON.stringify(text)})` : "");
-    }
-  }
-  return ["#set page(margin: 18mm)", "#set text(size: 9pt)", "", ...outputLines, ""].join("\n");
+    }).join("\n\n");
+  return ["#set page(margin: 18mm)", "#set text(size: 9pt)", "", blocks(Lexer.lex(markdown)), ""]
+    .join("\n");
 }
 
 async function renderPdf(markdown: string, formatted: boolean): Promise<Uint8Array> {

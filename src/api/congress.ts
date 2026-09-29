@@ -283,7 +283,10 @@ export class CongressClient {
       throw new CongressApiError("Congress.gov response did not include a bill list.");
     }
     return {
-      bills: bills.map(parseBillSummary),
+      bills: bills.map((bill) => ({
+        ...parseBillSummary(bill),
+        retrievedAt: new Date().toISOString(),
+      })),
       more: hasNextPage(asRecord(raw), offset, bills.length),
     };
   }
@@ -291,7 +294,7 @@ export class CongressClient {
   /** Fetch a single bill's summary without its actions/subjects (used for direct number lookups). */
   async getBillSummary(ref: BillRef, signal?: AbortSignal): Promise<BillSummary> {
     const raw = await this.fetchJson(`/bill/${ref.congress}/${ref.type}/${ref.number}`, signal);
-    return parseBillSummary(asRecord(raw).bill);
+    return { ...parseBillSummary(asRecord(raw).bill), retrievedAt: new Date().toISOString() };
   }
 
   /** Find current members whose name matches the query (client-side filtering). */
@@ -369,6 +372,7 @@ export class CongressClient {
       }
       for (const item of list) {
         const summary = parseBillSummary(item);
+        summary.retrievedAt = new Date().toISOString();
         if (summary.congress === congress) summaries.push(summary);
       }
       more = hasNextPage(record, page * PAGE_SIZE, list.length);
@@ -499,6 +503,7 @@ export class CongressClient {
         ? "partial"
         : "complete",
     };
+    detail.retrievedAt = new Date().toISOString();
     return detail;
   }
 

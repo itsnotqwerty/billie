@@ -18,6 +18,7 @@ install -Dm644 README.md "$staging/usr/share/doc/billie/README.md"
 install -Dm644 docs/spec.md "$staging/usr/share/doc/billie/spec.md"
 install -Dm644 docs/design.md "$staging/usr/share/doc/billie/design.md"
 install -Dm644 docs/roadmap.md "$staging/usr/share/doc/billie/roadmap.md"
+install -Dm644 docs/saved-searches-and-notebooks.md "$staging/usr/share/doc/billie/saved-searches-and-notebooks.md"
 install -Dm644 packaging/debian/copyright "$staging/usr/share/doc/billie/copyright"
 install -Dm644 packaging/debian/control "$staging/DEBIAN/control"
 

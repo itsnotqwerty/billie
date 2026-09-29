@@ -5,10 +5,11 @@ Priority: optional
 Architecture: amd64
 Maintainer: Samuel Roux <office@gatewaycorporate.org>
 Recommends: typst
+Depends: micro
 Description: AI-powered TUI for the Congress.gov API
  Billie is a terminal UI for searching, comparing, and analyzing US
  legislation via the Congress.gov API, with optional AI-assisted
  analysis through any OpenAI-compatible endpoint.
  .
- PDF export requires the Typst compiler at runtime; all other features
- work without it.
+ PDF export requires the Typst compiler at runtime. Notebook note editing
+ uses the Micro editor; other features work without these tools.

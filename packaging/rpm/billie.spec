@@ -1,4 +1,6 @@
 Name:           billie
+%global debug_package %{nil}
+%global __strip /bin/true
 Version:        1.0.0
 Release:        1%{?dist}
 Summary:        AI-powered TUI for the Congress.gov API
@@ -10,6 +12,7 @@ Source0:        %{url}/archive/refs/tags/v%{version}.tar.gz
 BuildRequires:  deno
 # Only PDF export needs Typst at runtime; keep it optional for minimal systems.
 Recommends:     typst
+Requires:      micro
 
 %description
 Billie is a terminal UI for searching, comparing, and analyzing US
@@ -31,6 +34,7 @@ install -Dm644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 install -Dm644 docs/spec.md %{buildroot}%{_docdir}/%{name}/spec.md
 install -Dm644 docs/design.md %{buildroot}%{_docdir}/%{name}/design.md
 install -Dm644 docs/roadmap.md %{buildroot}%{_docdir}/%{name}/roadmap.md
+install -Dm644 docs/saved-searches-and-notebooks.md %{buildroot}%{_docdir}/%{name}/saved-searches-and-notebooks.md
 
 %files
 %{_bindir}/billie

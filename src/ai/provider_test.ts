@@ -31,6 +31,31 @@ const VALID_JSON = JSON.stringify({
   uncertainties: ["Fiscal impact not determinable from supplied data."],
 });
 
+Deno.test("AI note generation sends only the prompt and returns Markdown", async () => {
+  const provider = providerWith((_url, init) => {
+    const payload = JSON.parse(init.body!);
+    assertEquals(payload.messages.length, 2);
+    assertEquals(payload.messages[1], {
+      role: "user",
+      content: "Draft questions about health policy",
+    });
+    assertEquals(payload.messages[0].content.includes("No notebook records"), true);
+    return Promise.resolve(
+      Response.json({ choices: [{ message: { content: "# Questions\n\n- Who benefits?\n" } }] }),
+    );
+  });
+  assertEquals(
+    await provider.generateNote("Draft questions about health policy"),
+    "# Questions\n\n- Who benefits?\n",
+  );
+  await assertRejects(() => provider.generateNote(" "), AiError, "prompt");
+  await assertRejects(() => provider.generateNote("x".repeat(20_001)), AiError, "prompt");
+  const empty = providerWith(() =>
+    Promise.resolve(Response.json({ choices: [{ message: { content: " " } }] }))
+  );
+  await assertRejects(() => empty.generateNote("Draft a note"), AiError, "empty note");
+});
+
 Deno.test("parseAnalysisJson accepts a valid payload", () => {
   const result = parseAnalysisJson(VALID_JSON);
   assertEquals(result.summary, "A bill about wildfire response.");

@@ -8,6 +8,11 @@ if ! command -v typst >/dev/null 2>&1; then
 	exit 1
 fi
 
+if ! command -v micro >/dev/null 2>&1; then
+	echo "Micro is required for notebook note editing. Install micro and ensure it is on PATH." >&2
+	exit 1
+fi
+
 deno task build
 
 prefix="${BILLIE_INSTALL_DIR:-$HOME/.local/bin}"

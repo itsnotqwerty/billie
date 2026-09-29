@@ -25,5 +25,14 @@ jobs:
           tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/typst-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - run: deno task check
+      - name: Install Micro
+        run: sudo -n apt-get update && sudo -n apt-get install -y micro
       - run: deno task test
       - run: deno task build
+      - name: Micro terminal integration
+        run: python3 tests/micro_smoke.py
+      - name: Debian package and packaged terminal integration
+        run: |
+          ./packaging/debian/build-deb.sh
+          dpkg-deb --extract dist/billie_*.deb "$RUNNER_TEMP/billie-deb"
+          BILLIE_TEST_BINARY="$RUNNER_TEMP/billie-deb/usr/bin/billie" python3 tests/micro_smoke.py

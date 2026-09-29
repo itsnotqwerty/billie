@@ -184,8 +184,9 @@ export class KeyDecoder {
 export async function* decodeKeyStream(
   chunks: AsyncIterable<Uint8Array>,
   escapeDelayMs = 40,
+  inputEpoch: () => number = () => 0,
 ): AsyncGenerator<Key> {
-  const decoder = new KeyDecoder();
+  let decoder = new KeyDecoder();
   const iterator = chunks[Symbol.asyncIterator]();
   let next = iterator.next();
   while (true) {
@@ -203,15 +204,21 @@ export async function* decodeKeyStream(
     } finally {
       clearTimeout(timer);
     }
-    if (chunk === null) {
-      yield* decoder.flushEscape();
-    } else if (chunk.done) {
-      yield* decoder.finish();
-      return;
-    } else {
-      yield* decoder.push(chunk.value);
-      next = iterator.next();
+    const epoch = inputEpoch();
+    const keys = chunk === null
+      ? decoder.flushEscape()
+      : chunk.done
+      ? decoder.finish()
+      : decoder.push(chunk.value);
+    for (const key of keys) {
+      yield key;
+      if (epoch !== inputEpoch()) {
+        decoder = new KeyDecoder();
+        break;
+      }
     }
+    if (chunk?.done) return;
+    if (chunk !== null) next = iterator.next();
   }
 }
 
@@ -238,6 +245,27 @@ export function wrap(text: string, width: number, indent = ""): string[] {
 
 export class Terminal {
   private readonly encoder = new TextEncoder();
+  private readPending = false;
+  private suspended = false;
+  private inputEpoch = 0;
+
+  async handoff(operation: () => Promise<void>): Promise<void> {
+    if (this.readPending || this.suspended) {
+      throw new Error("Terminal input is not ready for editor handoff. Retry from the note menu.");
+    }
+    this.suspended = true;
+    this.inputEpoch++;
+    try {
+      this.exit();
+      await operation();
+    } finally {
+      try {
+        this.enter();
+      } finally {
+        this.suspended = false;
+      }
+    }
+  }
 
   size(): { columns: number; rows: number } {
     return Deno.consoleSize();
@@ -266,6 +294,7 @@ export class Terminal {
 
   /** Repaint the whole screen from an array of lines, clipped to the terminal size. */
   render(lines: string[]): void {
+    if (this.suspended) return;
     const { columns, rows } = Deno.consoleSize();
     const out = ["\x1b[H"];
     for (let row = 0; row < rows; row++) {
@@ -276,13 +305,19 @@ export class Terminal {
   }
 
   async *keys(): AsyncGenerator<Key> {
-    yield* decodeKeyStream(this.chunks());
+    yield* decodeKeyStream(this.chunks(), 40, () => this.inputEpoch);
   }
 
   private async *chunks(): AsyncGenerator<Uint8Array> {
     const buffer = new Uint8Array(64);
     while (true) {
-      const count = await Deno.stdin.read(buffer);
+      this.readPending = true;
+      let count: number | null;
+      try {
+        count = await Deno.stdin.read(buffer);
+      } finally {
+        this.readPending = false;
+      }
       if (count === null) return;
       yield buffer.slice(0, count);
     }

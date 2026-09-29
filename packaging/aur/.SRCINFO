@@ -9,6 +9,7 @@ pkgbase = billie
 	makedepends = git
 	depends = glibc
 	depends = typst
+	depends = micro
 	source = billie-0.1.0.tar.gz::https://github.com/sam/billie/archive/refs/tags/v0.1.0.tar.gz
 	sha256sums = SKIP
 

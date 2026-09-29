@@ -25,5 +25,6 @@ makepkg -si
 
 - The build requires `deno` (from `[extra]`) and `typst` (from `[extra]`) at build time.
 - `typst` is a runtime dependency for PDF export; it is checked at install time by `install.sh`.
+- `micro` is a runtime dependency for Markdown note editing and is also checked by `install.sh`.
 - The source URL assumes a GitHub release tag `v0.1.0`; adjust `url` and `source` if hosted
   elsewhere.

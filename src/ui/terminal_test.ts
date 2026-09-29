@@ -3,10 +3,11 @@ import {
   KeyDecoder,
   parseKeys,
   sanitizeTerminalText,
+  Terminal,
   truncate,
   wrap,
 } from "./terminal.ts";
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 
 Deno.test("parseKeys decodes printable characters", () => {
   assertEquals(parseKeys(new TextEncoder().encode("hi")), [
@@ -102,4 +103,48 @@ Deno.test("decodeKeyStream emits Escape on timeout and reuses the pending read",
   release();
   assertEquals((await keys.next()).value, { kind: "char", value: "q" });
   assertEquals((await keys.next()).done, true);
+});
+
+Deno.test("editor command is yielded without a pending read and handoff drops buffered keys", async () => {
+  let epoch = 0;
+  let reads = 0;
+  async function* chunks() {
+    reads++;
+    yield new TextEncoder().encode("eqq\x1b[");
+    reads++;
+    yield new TextEncoder().encode("w");
+  }
+  const keys = decodeKeyStream(chunks(), 1, () => epoch);
+  assertEquals((await keys.next()).value, { kind: "char", value: "e" });
+  assertEquals(reads, 1);
+  epoch++;
+  assertEquals((await keys.next()).value, { kind: "char", value: "w" });
+  assertEquals(reads, 2);
+  assertEquals((await keys.next()).done, true);
+});
+
+Deno.test("terminal handoff suppresses repaint and restores the TUI on editor failure", async () => {
+  const events: string[] = [];
+  const terminal = new Terminal();
+  terminal.exit = () => {
+    events.push("exit");
+  };
+  terminal.enter = () => {
+    events.push("enter");
+  };
+  terminal.write = () => {
+    throw new Error("Unexpected repaint");
+  };
+  await assertRejects(
+    () =>
+      terminal.handoff(async () => {
+        events.push("editor");
+        terminal.render(["must not paint"]);
+        await assertRejects(() => terminal.handoff(() => Promise.resolve()), Error, "not ready");
+        throw new Error("Editor failed");
+      }),
+    Error,
+    "Editor failed",
+  );
+  assertEquals(events, ["exit", "editor", "enter"]);
 });

@@ -26,3 +26,4 @@ sudo dpkg -i dist/billie_1.0.0_amd64.deb
 - `typst` is a `Recommends` (not a hard dependency): only PDF export needs it, and it is not yet
   packaged in every Debian/Ubuntu release.
 - Bump `Version:` in `control` together with the release tag.
+- `micro` is a required package dependency for notebook note editing.

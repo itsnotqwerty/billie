@@ -114,6 +114,75 @@ Deno.test("serializeExport supports every native format and style", async () => 
   assertEquals(markdownToPlainText("# Wildfire\n\n- **A & B**\n"), "Wildfire\n\nA & B\n");
 });
 
+Deno.test("HTML exports render bold Markdown while escaping source HTML and code spans", async () => {
+  const markdown = [
+    "# **Bold heading**",
+    "",
+    "Plain **bold & <script>alert(1)</script>** and __also bold__.",
+    "",
+    "- **Bold item** with **outer *emphasis* text**",
+    "",
+    "| Field | Value |",
+    "| --- | --- |",
+    "| **Bold cell** | __Another cell__ |",
+    "",
+    "`**literal code**` and \\*\\*escaped\\*\\* and unmatched **marker",
+  ].join("\n");
+  const bundle = { title: "Emphasis", markdown, text: markdownToPlainText(markdown), data: {} };
+  for (const style of ["formatted", "plain"] as const) {
+    const html = await serializeExport(bundle, "html", style) as string;
+    assertEquals(html.includes("<h1><strong>Bold heading</strong></h1>"), true);
+    assertEquals(
+      html.includes("<strong>bold &amp; &lt;script&gt;alert(1)&lt;/script&gt;</strong>"),
+      true,
+    );
+    assertEquals(html.includes("<strong>also bold</strong>"), true);
+    assertEquals(html.includes("<strong>Bold item</strong>"), true);
+    assertEquals(html.includes("<strong>outer <em>emphasis</em> text</strong>"), true);
+    assertEquals(html.includes("<td><strong>Bold cell</strong></td>"), true);
+    assertEquals(html.includes("<td><strong>Another cell</strong></td>"), true);
+    assertEquals(html.includes("<code>**literal code**</code>"), true);
+    assertEquals(html.includes("**escaped** and unmatched **marker"), true);
+    assertEquals(html.includes("<script>"), false);
+  }
+});
+
+Deno.test("PDF exports preserve bullet structure, nesting and continuation text", async () => {
+  const markdown = [
+    "# Findings",
+    "",
+    "- First item",
+    "  continued on the next line",
+    "  - Nested item",
+    "  - Another nested item",
+    "- Second item",
+    "",
+    "* Star item",
+    "",
+    "+ Plus item",
+    "",
+    "3. Numbered item",
+    "4. Next number",
+    "",
+    '- Safe #panic("not executed") [brackets]',
+    "",
+    "Ordinary paragraph.",
+  ].join("\n");
+  const formatted = markdownToTypst(markdown, true);
+  assertEquals((formatted.match(/#list\(/g) ?? []).length, 5);
+  assertEquals(formatted.includes('#text("First item\\ncontinued on the next line")'), true);
+  assertEquals(formatted.includes('[#text("Nested item")]'), true);
+  assertEquals(formatted.includes("#enum(start: 3,"), true);
+  assertEquals(formatted.includes('#text("Safe #panic(\\"not executed\\") [brackets]")'), true);
+  assertEquals(markdownToTypst(markdown, false).includes("#list("), false);
+  const pdf = await serializeExport(
+    { title: "Lists", markdown, text: markdownToPlainText(markdown), data: {} },
+    "pdf",
+    "formatted",
+  ) as Uint8Array;
+  assertEquals(new TextDecoder().decode(pdf.subarray(0, 5)), "%PDF-");
+});
+
 Deno.test("comparisonTextToMarkdown preserves both full text columns", () => {
   const comparison = compareBills(
     bill("hr", 12, "House Wildfire Act"),

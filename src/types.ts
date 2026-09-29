@@ -19,6 +19,7 @@ export interface Sponsor {
 }
 
 export interface BillSummary extends BillRef {
+  retrievedAt?: string;
   title: string;
   updateDate: string;
   originChamber?: string;

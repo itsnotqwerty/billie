@@ -197,6 +197,22 @@ export class OpenAiCompatProvider {
         }));
   }
 
+  async generateNote(prompt: string, signal?: AbortSignal): Promise<string> {
+    if (!prompt.trim() || prompt.length > 20_000) {
+      throw new AiError("Note prompt must contain 1 to 20000 characters.");
+    }
+    const content = await this.complete(
+      prompt,
+      "Draft research notes in Markdown responding to the user's prompt. " +
+        "No notebook records or legislative source documents have been supplied. " +
+        "Do not claim to have read them or invent citations. Distinguish uncertainty from fact. " +
+        "Return only the note's Markdown, without an enclosing code fence.",
+      signal,
+    );
+    if (!content.trim()) throw new AiError("AI provider returned an empty note.");
+    return content;
+  }
+
   async analyze(
     bill: BillDetail,
     billText: BillText,
@@ -322,6 +338,14 @@ export class OpenAiCompatProvider {
     systemPrompt: string,
     signal?: AbortSignal,
   ): Promise<AnalysisResult> {
+    return parseAnalysisJson(await this.complete(prompt, systemPrompt, signal));
+  }
+
+  private async complete(
+    prompt: string,
+    systemPrompt: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const url = new URL(`${this.baseUrl}/chat/completions`);
     const combined = signal
       ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)])
@@ -377,6 +401,6 @@ export class OpenAiCompatProvider {
     if (typeof content !== "string") {
       throw new AiError("AI provider response had no message content.");
     }
-    return parseAnalysisJson(content);
+    return content;
   }
 }

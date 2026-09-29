@@ -32,6 +32,7 @@ import {
 } from "../export.ts";
 import {
   type BillDetail,
+  type BillRef,
   type BillSummary,
   type BillText,
   recordLimitations,
@@ -40,9 +41,18 @@ import {
 import { pairColumns, sideBySide } from "./columns.ts";
 import { type FindHit, findInTexts, stepHit } from "./find.ts";
 import { type Key, Terminal, truncate, wrap } from "./terminal.ts";
+import type { SearchDefinition } from "../research/store.ts";
+import { type SavedSearchRepository, SavedSearchView } from "./saved_searches.ts";
+import { type NotebookRepository, NotebookView } from "./notebooks.ts";
+import { type NotesRepository, NotesView } from "./notes.ts";
+import { MicroEditor, NoteDrafts, type NoteEditor } from "../research/editor.ts";
+import { exportResearch, resumeImport, stageImport } from "../research/portability.ts";
 
 type ViewName =
   | "menu"
+  | "savedSearches"
+  | "notebooks"
+  | "notes"
   | "config"
   | "configEdit"
   | "modelPick"
@@ -98,9 +108,24 @@ const BILL_TYPE_FILTERS: ReadonlyArray<string | null> = [
 ];
 
 export interface AppDependencies {
-  terminal?: Pick<Terminal, "enter" | "exit" | "render" | "keys" | "size">;
+  terminal?:
+    & Pick<Terminal, "enter" | "exit" | "render" | "keys" | "size">
+    & Partial<Pick<Terminal, "handoff">>;
   client?: Pick<CongressClient, "searchBillsWithCoverage" | "getBillDetail" | "getBillText">;
-  provider?: Pick<OpenAiCompatProvider, "model" | "analyze" | "analyzeComparison">;
+  provider?:
+    & Pick<OpenAiCompatProvider, "model" | "analyze" | "analyzeComparison">
+    & Partial<Pick<OpenAiCompatProvider, "generateNote">>;
+  research?:
+    & SavedSearchRepository
+    & NotebookRepository
+    & NotesRepository
+    & Pick<
+      import("../research/store.ts").ResearchStore,
+      "saveMetadata" | "failMetadata" | "filePath"
+    >;
+  researchError?: string;
+  editor?: NoteEditor;
+  drafts?: NoteDrafts;
 }
 
 export class App {
@@ -130,6 +155,17 @@ export class App {
   private filterType: string | null = null;
   private filterCongress: number = currentCongress();
   private lastQuery = "";
+  private completedSearch: SearchDefinition | null = null;
+  private savedSearchView: SavedSearchView | null = null;
+  private notebookView: NotebookView | null = null;
+  private notebookAddition: Promise<void> | null = null;
+  private archiveTask: Promise<void> | null = null;
+  private notesView: NotesView | null = null;
+  private citationSearch: NotesView | null = null;
+  private notebookSearch: string | null = null;
+  private researchSelection = new Map<string, BillSummary>();
+  private editorActive = false;
+  private noteGenerations = new Set<Promise<void>>();
   private searchScanned = 0;
   private searchNextOffset: number | undefined;
   private searchLimitations: string[] = [];
@@ -177,16 +213,23 @@ export class App {
     this.status = this.client
       ? "Welcome to Billie. Press h for help."
       : "No Congress.gov API key configured — press i to add one.";
+    if (this.dependencies.researchError) {
+      this.status = `Saved searches unavailable: ${this.dependencies.researchError}`;
+    }
     try {
       this.render();
       for await (const key of this.term.keys()) {
-        this.handleKey(key);
+        await this.handleKey(key);
         if (!this.running) break;
         this.render();
       }
     } finally {
       this.running = false;
       this.cancelRequests();
+      this.notebookView?.cancelAddition();
+      await this.notebookAddition;
+      await this.archiveTask;
+      await Promise.all(this.noteGenerations);
       this.term.exit();
     }
   }
@@ -194,6 +237,7 @@ export class App {
   private quit(): void {
     this.running = false;
     this.cancelRequests();
+    this.notebookView?.cancelAddition();
   }
 
   private cancelRequests(): void {
@@ -232,13 +276,23 @@ export class App {
       this.status = "Marks cleared.";
     }
     this.view = destination;
+    if (destination === "notes" || destination === "menu") this.citationSearch = null;
+    if (destination === "notebooks" || destination === "menu") {
+      if (this.notebookSearch && destination === "notebooks") this.notebookView?.refresh();
+      this.notebookSearch = null;
+    }
+    if (!this.citationSearch && !this.notebookSearch) this.researchSelection.clear();
   }
 
   private reset(): void {
     this.cancelRequests();
+    this.citationSearch = null;
+    this.notebookSearch = null;
+    this.researchSelection.clear();
     this.history = [];
     this.view = "menu";
     this.results = [];
+    this.completedSearch = null;
     this.searchScanned = 0;
     this.searchNextOffset = undefined;
     this.searchLimitations = [];
@@ -267,9 +321,156 @@ export class App {
     this.pendingFindQuery = null;
   }
 
-  private handleKey(key: Key): void {
+  private handleKey(key: Key): void | Promise<void> {
     if (key.kind === "ctrl" && key.value === "c") {
       this.quit();
+      return;
+    }
+    if (this.view === "notes" && this.notesView) return this.handleNotes(key);
+    if (this.view === "notebooks" && this.notebookView) {
+      if (this.archiveTask || this.loading === "Refreshing reference metadata...") {
+        if (key.kind === "escape") this.cancelRequests();
+        return;
+      }
+      this.cancelRequests();
+      const action = this.notebookView.handle(key);
+      if (action?.kind === "close") this.back();
+      else if (action?.kind === "search") {
+        this.notebookSearch = action.notebookId;
+        this.beginSearchOrFind();
+      } else if (action?.kind === "notes" && this.dependencies.research) {
+        let destination = "Invalid AI endpoint; configure it from the main menu.";
+        try {
+          const url = new URL(this.config.aiBaseUrl);
+          destination = `${url.origin}${url.pathname}`;
+        } catch {
+          destination = "Invalid AI endpoint; configure it from the main menu.";
+        }
+        this.notesView = new NotesView(
+          this.dependencies.research,
+          this.dependencies.drafts ?? new NoteDrafts(),
+          action.notebookId,
+          action.referenceIds,
+          {
+            destination,
+            model: this.provider?.model ?? this.config.aiModel,
+            exportDir: expandHomePath(this.config.exportDir),
+          },
+        );
+        this.pushView("notes");
+        this.status = "";
+      } else if (action?.kind === "add") {
+        this.notebookAddition = this.notebookView.addPending(action.notebookId, () => {
+          if (this.running && this.view === "notebooks") this.render();
+        });
+      } else if (action?.kind === "archive") {
+        const controller = new AbortController();
+        this.pending = controller;
+        this.loading = "Processing research archive; Esc cancels remaining work...";
+        this.status = "";
+        const store = this.dependencies.research!;
+        this.archiveTask = (async () => {
+          if (action.operation === "json" || action.operation === "markdown") {
+            const destination = expandHomePath(action.location || this.config.exportDir);
+            const output = await exportResearch(
+              store,
+              destination,
+              action.operation,
+              action.notebookId,
+              controller.signal,
+            );
+            if (this.running) this.status = `Exported ${output}`;
+          } else {
+            const source = expandHomePath(action.location);
+            const stage = action.operation === "resume"
+              ? source
+              : await stageImport(store, source, controller.signal);
+            const count = await resumeImport(
+              store,
+              stage,
+              controller.signal,
+              (committed, total) => {
+                if (this.ownsRequest(controller)) {
+                  this.loading =
+                    `Importing ${committed}/${total}; Esc cancels remaining batches...`;
+                  this.render();
+                }
+              },
+            );
+            if (this.running) {
+              this.status = `Imported ${count} records. Completed private stage: ${stage}`;
+            }
+            this.notebookView?.refresh();
+          }
+        })().catch((error) => {
+          if (this.running) this.status = error instanceof Error ? error.message : String(error);
+          this.notebookView?.refresh();
+        }).finally(() => {
+          this.archiveTask = null;
+          this.finishRequest(controller);
+          if (this.running) this.render();
+        });
+      } else if (action?.kind === "refresh") {
+        if (!this.client) {
+          this.status = "A Congress.gov API key is required to refresh metadata.";
+        } else {
+          const controller = new AbortController();
+          this.pending = controller;
+          this.loading = "Refreshing reference metadata...";
+          this.client.getBillDetail(action.reference, controller.signal).then((detail) => {
+            if (!this.ownsRequest(controller)) return;
+            this.dependencies.research!.saveMetadata(
+              action.reference.id,
+              detail,
+              new Date().toISOString(),
+            );
+            this.notebookView?.refresh();
+            this.status = "Metadata refreshed. Notes unchanged.";
+          }).catch((error) => {
+            if (!this.ownsRequest(controller)) return;
+            try {
+              this.dependencies.research!.failMetadata(
+                action.reference.id,
+                new Date().toISOString(),
+              );
+            } catch (storageError) {
+              this.status = `Refresh failed and its status could not be stored: ${
+                storageError instanceof Error ? storageError.message : String(storageError)
+              }`;
+              this.notebookView?.refresh();
+              return;
+            }
+            this.notebookView?.refresh();
+            this.status = `Metadata refresh failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`;
+          }).finally(() => this.finishRequest(controller));
+        }
+      } else if (action?.kind === "open" || action?.kind === "compare") {
+        if (!this.client) {
+          this.status =
+            "A Congress.gov API key is required to fetch details; notebook membership is available offline.";
+        } else if (action.kind === "open") this.openDetail(action.reference);
+        else this.compareReferences(action.references);
+      }
+      return;
+    }
+    if (this.view === "savedSearches" && this.savedSearchView) {
+      this.cancelRequests();
+      const action = this.savedSearchView.handle(key);
+      if (action?.kind === "close") this.back();
+      else if (action?.kind === "run") {
+        if (!this.client) {
+          this.status =
+            "A Congress.gov API key is required to run a saved search; Esc returns to configuration.";
+          return;
+        }
+        this.filterCongress = action.search.congress.mode === "current"
+          ? currentCongress()
+          : action.search.congress.congress;
+        this.filterType = action.search.type;
+        this.startSearch(action.search.query);
+      }
       return;
     }
     if (this.view === "config") {
@@ -328,6 +529,65 @@ export class App {
   }
 
   private handleCommand(char: string): void {
+    if ((this.notebookSearch || this.citationSearch) && this.view === "results") {
+      if (char === " " || char === "m") {
+        const reference = this.results[this.selected];
+        if (reference && !this.loading) {
+          const id = this.refKey(reference);
+          if (!this.researchSelection.delete(id)) this.researchSelection.set(id, reference);
+        }
+        return;
+      }
+      if (
+        this.researchSelection.size &&
+        ((this.notebookSearch && char === "b") || (this.citationSearch && char === "c"))
+      ) {
+        this.applyResearchSelection();
+        return;
+      }
+    }
+    if (this.notebookSearch && (this.view === "results" || this.view === "detail")) {
+      if (char === "b") {
+        const reference = this.view === "results" ? this.results[this.selected] : this.detail;
+        if (this.loading) {
+          this.status = "Wait for the search or detail request to finish before adding.";
+        } else if (reference && this.dependencies.research) {
+          try {
+            const result = this.dependencies.research.addReferences(this.notebookSearch, [
+              reference,
+            ]);
+            this.status = `${billLabel(reference)}: ${
+              result.added ? "added to notebook" : "already present"
+            }.`;
+          } catch (error) {
+            this.status = error instanceof Error ? error.message : String(error);
+          }
+        }
+        return;
+      }
+      if (["B", "u", "o", "p", "m", " ", "a", "c"].includes(char)) return;
+    }
+    if (this.citationSearch && (this.view === "results" || this.view === "detail")) {
+      if (char === "c") {
+        const reference = this.view === "results" ? this.results[this.selected] : this.detail;
+        if (this.loading) {
+          this.status = "Wait for the search or detail request to finish before citing.";
+        } else if (reference) {
+          try {
+            this.status = this.citationSearch.citeReference(reference);
+          } catch (error) {
+            this.status = error instanceof Error ? error.message : String(error);
+          }
+        }
+        return;
+      }
+      if (["b", "B", "u", "o", "p", "m", " ", "a"].includes(char)) return;
+    }
+    if (char === "B" && this.view === "results") {
+      if (this.results.length) this.openNotebooks(this.results);
+      else this.status = "No loaded results to add.";
+      return;
+    }
     if (char === "G") {
       this.jumpToEdge("end");
       return;
@@ -354,6 +614,23 @@ export class App {
         break;
       case "s":
         this.beginSearchOrFind();
+        break;
+      case "o":
+        this.openSavedSearches();
+        break;
+      case "u":
+        this.openNotebooks();
+        break;
+      case "b":
+        if (this.view === "results" && this.results[this.selected]) {
+          this.openNotebooks([this.results[this.selected]]);
+        } else if (this.view === "detail" && this.detail) this.openNotebooks([this.detail]);
+        else if (this.readingView()) this.page(-1);
+        break;
+      case "p":
+        if (this.view === "results" && this.completedSearch) {
+          this.openSavedSearches(this.completedSearch);
+        }
         break;
       case "n":
         this.stepFind(1);
@@ -408,8 +685,118 @@ export class App {
     else if (char === ">") this.shiftCongress(1);
   }
 
+  private applyResearchSelection(): void {
+    if (this.loading) {
+      this.status = "Wait for the search request to finish before applying selections.";
+      return;
+    }
+    let processed = 0;
+    try {
+      for (const [id, reference] of this.researchSelection) {
+        if (this.citationSearch) this.citationSearch.citeReference(reference);
+        else if (this.notebookSearch && this.dependencies.research) {
+          this.dependencies.research.addReferences(this.notebookSearch, [reference]);
+        } else throw new Error("No research destination selected.");
+        this.researchSelection.delete(id);
+        processed++;
+      }
+      this.status = `Applied ${processed} selected references. Existing references unchanged.`;
+    } catch (error) {
+      this.status =
+        `Applied ${processed}; ${this.researchSelection.size} selected references remaining. ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+    }
+  }
+
+  private async handleNotes(key: Key): Promise<void> {
+    const notes = this.notesView!;
+    const action = await notes.handle(key);
+    if (action?.kind === "close") {
+      this.back();
+      this.notebookView?.refresh();
+    } else if (action?.kind === "search") {
+      this.citationSearch = notes;
+      this.beginSearchOrFind();
+    } else if (action?.kind === "generate") {
+      this.generateNote(notes, action.prompt);
+    } else if (action?.kind === "cancelGeneration") {
+      this.cancelRequests();
+    } else if (action?.kind === "export") {
+      this.openExportMenu(action);
+    } else if (action?.kind === "edit") {
+      const editor = this.dependencies.editor ?? new MicroEditor();
+      let failure: unknown;
+      try {
+        await editor.check();
+        if (!this.term.handoff) throw new Error("This terminal does not support editor handoff.");
+        this.cancelRequests();
+        this.editorActive = true;
+        await this.term.handoff(() => editor.edit(action.filePath));
+      } catch (error) {
+        failure = error;
+      } finally {
+        this.editorActive = false;
+      }
+      await notes.editorReturned(failure);
+    }
+  }
+
+  private generateNote(notes: NotesView, prompt: string): void {
+    const provider = this.provider;
+    if (!provider?.generateNote) {
+      notes.generationFailed(
+        "No AI provider configured. Use i from the main menu to configure a key or local endpoint.",
+      );
+      return;
+    }
+    this.cancelRequests();
+    const controller = new AbortController();
+    this.pending = controller;
+    this.loading = "Generating AI note...";
+    const task = Promise.resolve().then(() => provider.generateNote!(prompt, controller.signal))
+      .then(async (markdown) => {
+        if (!this.ownsRequest(controller)) return;
+        await notes.generated(markdown, provider.model, controller.signal);
+      })
+      .catch((error) => {
+        if (this.ownsRequest(controller)) notes.generationFailed(error);
+      })
+      .finally(() => {
+        this.noteGenerations.delete(task);
+        this.finishRequest(controller);
+      });
+    this.noteGenerations.add(task);
+  }
+
   private readingView(): boolean {
     return this.view === "detail" || this.view === "compare" || this.view === "analysis";
+  }
+
+  private openSavedSearches(seed?: SearchDefinition): void {
+    if (!this.dependencies.research) {
+      this.status = `Saved searches unavailable: ${
+        this.dependencies.researchError ?? "research storage was not opened"
+      }`;
+      return;
+    }
+    this.cancelRequests();
+    this.savedSearchView = new SavedSearchView(this.dependencies.research, seed);
+    this.pushView("savedSearches");
+    this.status = "";
+  }
+
+  private openNotebooks(references: readonly BillRef[] = []): void {
+    if (!this.dependencies.research) {
+      this.status = `Notebooks unavailable: ${
+        this.dependencies.researchError ?? "research storage was not opened"
+      }`;
+      return;
+    }
+    this.cancelRequests();
+    this.notebookView = new NotebookView(this.dependencies.research, references);
+    this.pushView("notebooks");
+    this.status = "";
   }
 
   private pageSize(): number {
@@ -700,7 +1087,7 @@ export class App {
           if (value.length > 0) this.startComparisonAnalysis(value);
           else this.status = "Comparison analysis cancelled.";
         } else if (value.length > 0) {
-          this.back();
+          if (!this.citationSearch && !this.notebookSearch) this.back();
           this.startSearch(value);
         } else {
           this.back();
@@ -819,10 +1206,20 @@ export class App {
 
   private startSearch(query: string, append = false): void {
     if (!this.client) {
-      this.status = "No Congress.gov API key configured — press i to add one.";
+      this.status = this.citationSearch
+        ? "No Congress.gov API key configured. Esc returns to citations; use i from the main menu to configure one."
+        : this.notebookSearch
+        ? "No Congress.gov API key configured. Esc returns to the notebook; use i from the main menu to configure one."
+        : "No Congress.gov API key configured — press i to add one.";
       return;
     }
     this.lastQuery = query;
+    const definition: SearchDefinition = {
+      name: query,
+      query,
+      type: this.filterType,
+      congress: { mode: "fixed", congress: this.filterCongress },
+    };
     this.pending?.abort();
     const controller = new AbortController();
     this.pending = controller;
@@ -836,6 +1233,10 @@ export class App {
     })
       .then((result) => {
         if (!this.ownsRequest(controller)) return;
+        if ((this.citationSearch || this.notebookSearch) && this.view === "search") {
+          this.view = this.history.pop() ?? (this.notebookSearch ? "notebooks" : "notes");
+        }
+        this.completedSearch = definition;
         this.loading = null;
         const merged = new Map(
           (append ? this.results : []).map((bill) => [this.refKey(bill), bill]),
@@ -906,7 +1307,12 @@ export class App {
       this.status = "Mark two bills in the results list with Space/m, then press c.";
       return;
     }
-    const [a, b] = [...this.marked.values()];
+    this.compareReferences([...this.marked.values()]);
+  }
+
+  private compareReferences(references: readonly BillRef[]): void {
+    if (!this.client || references.length !== 2) return;
+    const [a, b] = references;
     this.pending?.abort();
     const controller = new AbortController();
     this.pending = controller;
@@ -1051,7 +1457,7 @@ export class App {
 
   // ----- bill detail and verbatim text -----
 
-  private openDetail(summary: BillSummary): void {
+  private openDetail(summary: BillRef): void {
     if (!this.client) return;
     this.pending?.abort();
     const controller = new AbortController();
@@ -1079,7 +1485,8 @@ export class App {
     this.detailMode = "overview";
     this.scroll = 0;
     if (this.view !== "detail") this.pushView("detail");
-    this.status = `${detail.type.toUpperCase()} ${detail.number} — w export · a analyze · x text`;
+    this.status =
+      `${detail.type.toUpperCase()} ${detail.number} — w export · a analyze · x text · b add to notebook`;
   }
 
   private toggleTextMode(): void {
@@ -1153,9 +1560,9 @@ export class App {
 
   // ----- export -----
 
-  private openExportMenu(): void {
-    let bundle: ExportBundle | null = null;
-    let baseName = "";
+  private openExportMenu(noteExport?: { bundle: ExportBundle; baseName: string }): void {
+    let bundle: ExportBundle | null = noteExport?.bundle ?? null;
+    let baseName = noteExport?.baseName ?? "";
     if (this.view === "detail" && this.detail) {
       if (this.detailMode === "text") {
         const text = this.billTexts.get(this.refKey(this.detail));
@@ -1332,6 +1739,7 @@ export class App {
   // ----- rendering -----
 
   render(): void {
+    if (this.editorActive) return;
     const { columns } = this.term.size();
     const width = Math.max(40, columns - 2);
     const lines: string[] = [];
@@ -1350,14 +1758,22 @@ export class App {
         return [
           "   [i] Configure Congress.gov / AI API keys",
           "   [s] Search bills",
+          "   [o] Saved searches",
+          "   [u] Research notebooks",
           "   [h] Help",
           "   [q] Quit",
           "",
           "   Results: Space/m mark · c compare two marks · t filter type · </> congress",
           "   Bill detail: x verbatim text · a AI analysis (configure key via i) · w export options",
           "   Comparison: x text · a ask AI how the bills differ · w export options",
-          "   Long views: PgUp/PgDn or f/v page · b page up · g/G jump to edges",
+          "   Long views: PgUp/PgDn or f/v page · g/G jump to edges",
         ];
+      case "savedSearches":
+        return this.savedSearchView?.lines(this.pageSize()) ?? ["  Saved searches unavailable."];
+      case "notebooks":
+        return this.notebookView?.lines(this.pageSize()) ?? ["  Notebooks unavailable."];
+      case "notes":
+        return this.notesView?.lines(this.pageSize()) ?? ["  Notes unavailable."];
       case "config":
         return [
           "  Configuration",
@@ -1451,7 +1867,13 @@ export class App {
         ];
       case "search":
         return [
-          `  Search bills — ${this.filterCongress}th Congress`,
+          `  ${
+            this.citationSearch
+              ? "Search legislation to cite"
+              : this.notebookSearch
+              ? "Search legislation to add"
+              : "Search bills"
+          } — ${this.filterCongress}th Congress`,
           "",
           "  Enter keywords, a bill number like “hr5676” / “s 301”, or part of a sponsor’s name.",
           "  (Enter to search, Esc to cancel)",
@@ -1477,9 +1899,12 @@ export class App {
           "  Space/m  Mark for compare    x  Overview / text (side-by-side in compare)",
           "  t  Cycle bill-type filter    < >  Change congress",
           "  l  Load more title-search results",
+          "  o  Saved searches           p  Save query from results",
+          "  u  Notebooks                b  Add selected bill / B  Add loaded results",
+          "  In notebooks: f refresh metadata / w JSON or Markdown archives, import, resume",
           "  ←/,  Previous match           →/.  Next match",
           "  n / N  Next / previous match in displayed text",
-          "  PgUp/PgDn or f/v  Page       b  Page up · g/G or Home/End jump to edges",
+          "  PgUp/PgDn or f/v  Page       g/G or Home/End jump to edges",
           "  g/G or Home/End  Jump to start / end",
           "  z  Back (undo)               d  Clear and return to menu",
           "  h  Toggle this help          q  Quit",
@@ -1491,9 +1916,26 @@ export class App {
   private resultLines(width: number): string[] {
     const filterLabel = this.filterType ? ` [${this.filterType.toUpperCase()}]` : "";
     const lines = [
-      `  Results — ${this.filterCongress}th Congress${filterLabel} (${this.marked.size}/2 marked)`,
-      "  ↑/↓ or j/k move · Enter/v open · Space/m mark · c compare · t type · </> congress · " +
-      "s new search",
+      this.citationSearch
+        ? `  Citation search - ${this.filterCongress}th Congress${filterLabel}`
+        : this.notebookSearch
+        ? `  Notebook search - ${this.filterCongress}th Congress${filterLabel}`
+        : `  Results — ${this.filterCongress}th Congress${filterLabel} (${this.marked.size}/2 marked)`,
+      ...(this.citationSearch
+        ? [
+          "  c cite selected + add to notebook / Enter open / Esc back to citations",
+          `  Space/m toggle (${this.researchSelection.size} selected) / s search / t type / </> congress`,
+        ]
+        : this.notebookSearch
+        ? [
+          "  b add selected to notebook / Enter open / Esc back to notebook",
+          `  Space/m toggle (${this.researchSelection.size} selected) / s search / t type / </> congress`,
+        ]
+        : [
+          "  ↑/↓ or j/k move · Enter/v open · Space/m mark · c compare · t type · </> congress · " +
+          "s new search · p save query · o saved searches",
+          "  u notebooks · b add selected · B Add loaded results",
+        ]),
       `  ${this.searchScanned} bill records scanned. ${
         this.searchNextOffset !== undefined
           ? "Partial title coverage: l loads more."
@@ -1510,7 +1952,10 @@ export class App {
     for (const [position, bill] of this.results.slice(start, start + size).entries()) {
       const index = start + position;
       const cursor = index === this.selected ? ">" : " ";
-      const mark = this.marked.has(this.refKey(bill)) ? "*" : " ";
+      const selection = this.citationSearch || this.notebookSearch
+        ? this.researchSelection
+        : this.marked;
+      const mark = selection.has(this.refKey(bill)) ? "*" : " ";
       const label = `${bill.type.toUpperCase()}${bill.number}`;
       const title = bill.title.length > width - 12
         ? [...bill.title].slice(0, width - 15).join("") + "…"
@@ -1525,6 +1970,8 @@ export class App {
     if (!detail) return ["  (no bill selected)"];
     if (this.detailMode === "text") return this.billTextLines(detail, width);
     const lines: string[] = [];
+    if (this.citationSearch) lines.push("  c cite this legislation + add to notebook / Esc back");
+    if (this.notebookSearch) lines.push("  b add this legislation to notebook / Esc back");
     lines.push(`  ${detail.type.toUpperCase()} ${detail.number} — ${detail.congress}th Congress`);
     lines.push(...wrap(detail.title, width, "  "));
     lines.push(...recordLimitations(detail).flatMap((notice) => wrap(notice, width, "  ")));
