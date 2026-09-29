@@ -1,7 +1,7 @@
 Name:           billie
 %global debug_package %{nil}
 %global __strip /bin/true
-Version:        1.0.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        AI-powered TUI for the Congress.gov API
 
@@ -41,5 +41,8 @@ install -Dm644 docs/saved-searches-and-notebooks.md %{buildroot}%{_docdir}/%{nam
 %doc %{_docdir}/%{name}
 
 %changelog
+* Tue Sep 29 2026 Samuel Roux <office@gatewaycorporate.org> - 1.2.0-1
+- Research notebooks, notes, citations, and archive import/export
+- Disable stripping/debug extraction to preserve the Deno executable payload
 * Mon Sep 28 2026 Samuel Roux <office@gatewaycorporate.org> - 1.0.0-1
 - Initial package

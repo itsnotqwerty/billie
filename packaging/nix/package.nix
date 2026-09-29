@@ -10,7 +10,7 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "billie";
-  version = "1.0.0";
+  version = "1.2.0";
 
   # Repository root, two levels up from this file.
   src = ../../..;

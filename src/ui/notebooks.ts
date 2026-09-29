@@ -29,6 +29,7 @@ type Action =
   | { kind: "add"; notebookId: string }
   | { kind: "search"; notebookId: string }
   | { kind: "refresh"; reference: NotebookReference }
+  | { kind: "refreshPage"; references: NotebookReference[] }
   | {
     kind: "archive";
     operation: "json" | "markdown" | "import" | "resume";
@@ -81,6 +82,7 @@ export class NotebookView {
     | null = null;
   private marked = new Map<string, NotebookReference>();
   private addition: AbortController | null = null;
+  private libraryCounts = new Map<string, { references: number; notes: number }>();
 
   constructor(
     private readonly repository: NotebookRepository,
@@ -256,7 +258,9 @@ export class NotebookView {
         };
       } else if (command === "s") return { kind: "search", notebookId: this.notebook.id };
       else if (command === "a") this.beginInput("reference", "");
-      else if (command === "f" && reference) return { kind: "refresh", reference };
+      else if (key.kind === "char" && key.value === "F" && this.references.length) {
+        return { kind: "refreshPage", references: [...this.references] };
+      } else if (command === "f" && reference) return { kind: "refresh", reference };
       else if (key.kind === "enter" && reference) return { kind: "open", reference };
       else if ((command === "m" || command === " ") && reference) {
         if (this.marked.has(reference.id)) this.marked.delete(reference.id);
@@ -408,6 +412,15 @@ export class NotebookView {
     } else {
       const page = this.repository.listNotebooks(this.library);
       this.notebooks = page.items;
+      this.libraryCounts = new Map(
+        page.items.map((notebook) => [
+          notebook.id,
+          {
+            references: this.repository.countReferences(notebook.id),
+            notes: this.repository.countNotes(notebook.id),
+          },
+        ]),
+      );
       this.library.next = page.nextCursor;
       this.library.selected = Math.max(0, Math.min(this.library.selected, page.items.length - 1));
     }
@@ -486,7 +499,12 @@ export class NotebookView {
             ref.metadata?.title ? ` | ${ref.metadata.title}` : " | unresolved"
           }`
         )
-        : this.notebooks.map((notebook) => notebook.title);
+        : this.notebooks.map((notebook) => {
+          const counts = this.libraryCounts.get(notebook.id);
+          return counts
+            ? `${notebook.title} (${counts.references} references, ${counts.notes} notes)`
+            : notebook.title;
+        });
       lines = [
         this.notebook
           ? `  Notebook: ${this.notebook.title} (${this.count} references)`
@@ -508,7 +526,7 @@ export class NotebookView {
         }`,
         "",
         ...(this.notebook
-          ? ["  f refresh highlighted metadata (network)", ...this.metadataLines()]
+          ? ["  f refresh highlighted / F current page metadata (network)", ...this.metadataLines()]
           : []),
         ...(rows.length
           ? rows.slice(start, start + available).map((row, index) =>

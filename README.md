@@ -89,10 +89,11 @@ restart to restore library access.
 
 ## Research notebooks
 
-Press `u` to browse notebooks. `n` creates one, `e` edits its title and description, and `x` asks
-for deletion confirmation with reference and note counts. In the editor, `n` edits the title, `d`
-edits the description, and `w` explicitly saves. Esc asks before discarding changes. Failed saves
-retain the draft; stale revisions cannot overwrite another instance's edits.
+Press `u` to browse notebooks. The library lists each notebook with its reference and note counts.
+`n` creates one, `e` edits its title and description, and `x` asks for deletion confirmation with
+reference and note counts. In the editor, `n` edits the title, `d` edits the description, and `w`
+explicitly saves. Esc asks before discarding changes. Failed saves retain the draft; stale revisions
+cannot overwrite another instance's edits.
 
 From results or bill details, `b` selects a destination notebook for that bill. In results, `B` is
 **Add loaded results**, not all possible matches. Choose a notebook with Enter, or create one first.
@@ -127,18 +128,20 @@ unprocessed selections for retry and report committed progress; earlier commits 
 Notebook management and reference browsing work without an API key. Explicitly adding fetched
 results retains their title, source URL, source update date, actual retrieval time, and limitations.
 Offline identifiers remain unresolved. Opening a notebook makes no API calls. Press `f` to refresh
-the highlighted reference with a Congress.gov key; old or failed snapshots are marked stale. Failed
-refreshes retain previous metadata and never change notes. Search replay, reset, and comparison do
-not change persisted membership. Removing a reference affects only that notebook; deleting a
-notebook leaves other notebooks intact. If notes cite a reference, ordinary removal is blocked. `u`
-in the removal prompt opens a separate confirmation to unlink those citations and remove the
-reference; note text is preserved unchanged. Deletion confirmations reject intervening edits rather
-than silently deleting newer research.
+the highlighted reference, or uppercase `F` to refresh only the current visible page. Page refreshes
+run sequentially, show progress, and Esc cancels remaining requests. Old or failed snapshots are
+marked stale; failures retain previous metadata and never change notes. Search replay, reset, and
+comparison do not change persisted membership. Removing a reference affects only that notebook;
+deleting a notebook leaves other notebooks intact. If notes cite a reference, ordinary removal is
+blocked. `u` in the removal prompt opens a separate confirmation to unlink those citations and
+remove the reference; note text is preserved unchanged. Deletion confirmations reject intervening
+edits rather than silently deleting newer research.
 
 Press `n` inside a notebook to open Notes. In Notes, `n` creates a titled draft, Enter reads the
 selected note, `e` edits it in `micro`, and `x` confirms deletion. On an empty Notes list, `e`
-starts a new titled draft. `l` and `b` page the list; `r` reloads it. Editing is local and does not
-require an API key or send note content to AI.
+starts a new titled draft. `/` searches note titles and bodies locally; an empty query clears the
+filter. `l` and `b` page matching summaries; bodies load only when a note is opened. `r` reloads.
+Editing and searching are local and do not require an API key or send note content to AI.
 
 Press `w` on a saved note in the Notes list or reading view to open the same export menu used by
 comparisons and analyses. Choose Markdown, XML, JSON, CSV, HTML, or PDF; formatted/plain style;

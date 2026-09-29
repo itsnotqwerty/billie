@@ -419,8 +419,27 @@ add 300 citations through six 50-reference pages, and cover filtering, duplicate
 confirmed removal, concurrent edits, failed writes, deleted membership, and unchanged Markdown. An
 offline application test verifies navigation and counts. The compiled real-Micro PTY test now adds
 three cross-Congress citations, preserves them across editing and restart, and removes one without
-deleting notebook membership. Offline metadata snapshots and notebook import/export remain the next
-research features; hosted CI and fresh package builds remain unverified.
+deleting notebook membership. Offline metadata snapshots and notebook import/export are now
+implemented; hosted CI and fresh package verification are tracked in the release gates above.
+
+## Phase 7: Research workflow ergonomics
+
+**Outcome:** faster discovery and maintenance inside existing notebooks without expanding network,
+privacy, collaboration, or destructive-migration scope. The [next-features plan](next-features.md)
+governs this phase.
+
+- [x] Search note titles and bodies offline with bounded keyset paging. `/` in Notes matches titles
+      and bodies case-insensitively, preserves paging, clears with an empty query, and loads a body
+      only when a matching note is opened.
+- [x] Refresh metadata for the current notebook page with explicit action, cancellation, and
+      previous-snapshot preservation. Uppercase `F` refreshes visible references sequentially;
+      failures retain old snapshots and leave notes unchanged.
+- [x] Show notebook reference and note counts using bounded aggregate queries. The library lists
+      `title (N references, M notes)`, computed once per page reload.
+- [x] Validate application and package versions together.
+      [version_test.ts](../packaging/version_test.ts) fails the test suite if AUR, Debian, Nix, or
+      RPM manifests diverge from [deno.json](../deno.json); all manifests are aligned at 1.2.0.
+- [ ] Verify native Debian and Nix package builds when available.
 
 ## Later opportunities
 

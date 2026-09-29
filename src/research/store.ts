@@ -684,17 +684,20 @@ export class ResearchStore {
     const limit = pageLimit(options.limit);
     const rows = this.database.prepare(`
       SELECT id, notebook_id, title, created_at, updated_at, revision FROM notes
-      WHERE notebook_id = ? AND id > ? AND instr(lower(title), lower(?)) > 0 ORDER BY id LIMIT ?
-    `).all(notebookId, options.after ?? "", options.query ?? "", limit + 1);
+      WHERE notebook_id = ? AND id > ?
+        AND (instr(lower(title), lower(?)) > 0 OR instr(lower(body), lower(?)) > 0)
+      ORDER BY id LIMIT ?
+    `).all(notebookId, options.after ?? "", options.query ?? "", options.query ?? "", limit + 1);
     const items = rows.slice(0, limit).map(readNoteSummary);
     return { items, nextCursor: rows.length > limit ? items.at(-1)!.id : undefined };
   }
 
-  countNotes(notebookId: string): number {
+  countNotes(notebookId: string, query = ""): number {
     return Number(
-      this.database.prepare("SELECT count(*) AS total FROM notes WHERE notebook_id = ?").get(
-        notebookId,
-      )!.total,
+      this.database.prepare(`
+        SELECT count(*) AS total FROM notes WHERE notebook_id = ?
+          AND (instr(lower(title), lower(?)) > 0 OR instr(lower(body), lower(?)) > 0)
+      `).get(notebookId, query, query)!.total,
     );
   }
 

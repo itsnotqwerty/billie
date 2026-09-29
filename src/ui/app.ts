@@ -41,7 +41,7 @@ import {
 import { pairColumns, sideBySide } from "./columns.ts";
 import { type FindHit, findInTexts, stepHit } from "./find.ts";
 import { type Key, Terminal, truncate, wrap } from "./terminal.ts";
-import type { SearchDefinition } from "../research/store.ts";
+import type { NotebookReference, SearchDefinition } from "../research/store.ts";
 import { type SavedSearchRepository, SavedSearchView } from "./saved_searches.ts";
 import { type NotebookRepository, NotebookView } from "./notebooks.ts";
 import { type NotesRepository, NotesView } from "./notes.ts";
@@ -328,7 +328,7 @@ export class App {
     }
     if (this.view === "notes" && this.notesView) return this.handleNotes(key);
     if (this.view === "notebooks" && this.notebookView) {
-      if (this.archiveTask || this.loading === "Refreshing reference metadata...") {
+      if (this.archiveTask || this.loading?.startsWith("Refreshing reference metadata")) {
         if (key.kind === "escape") this.cancelRequests();
         return;
       }
@@ -413,39 +413,11 @@ export class App {
       } else if (action?.kind === "refresh") {
         if (!this.client) {
           this.status = "A Congress.gov API key is required to refresh metadata.";
-        } else {
-          const controller = new AbortController();
-          this.pending = controller;
-          this.loading = "Refreshing reference metadata...";
-          this.client.getBillDetail(action.reference, controller.signal).then((detail) => {
-            if (!this.ownsRequest(controller)) return;
-            this.dependencies.research!.saveMetadata(
-              action.reference.id,
-              detail,
-              new Date().toISOString(),
-            );
-            this.notebookView?.refresh();
-            this.status = "Metadata refreshed. Notes unchanged.";
-          }).catch((error) => {
-            if (!this.ownsRequest(controller)) return;
-            try {
-              this.dependencies.research!.failMetadata(
-                action.reference.id,
-                new Date().toISOString(),
-              );
-            } catch (storageError) {
-              this.status = `Refresh failed and its status could not be stored: ${
-                storageError instanceof Error ? storageError.message : String(storageError)
-              }`;
-              this.notebookView?.refresh();
-              return;
-            }
-            this.notebookView?.refresh();
-            this.status = `Metadata refresh failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`;
-          }).finally(() => this.finishRequest(controller));
-        }
+        } else this.refreshMetadata([action.reference]);
+      } else if (action?.kind === "refreshPage") {
+        if (!this.client) {
+          this.status = "A Congress.gov API key is required to refresh metadata.";
+        } else this.refreshMetadata(action.references);
       } else if (action?.kind === "open" || action?.kind === "compare") {
         if (!this.client) {
           this.status =
@@ -526,6 +498,66 @@ export class App {
       default:
         break;
     }
+  }
+
+  private refreshMetadata(references: readonly NotebookReference[]): void {
+    if (!references.length || !this.client) return;
+    const client = this.client;
+    const controller = new AbortController();
+    this.pending = controller;
+    this.loading = references.length === 1
+      ? "Refreshing reference metadata..."
+      : `Refreshing reference metadata 0/${references.length}...`;
+    this.status = "";
+    void (async () => {
+      let saved = 0;
+      let failed = 0;
+      let cancelled = false;
+      for (const reference of references) {
+        if (!this.ownsRequest(controller)) return;
+        if (controller.signal.aborted) {
+          cancelled = true;
+          break;
+        }
+        this.loading = `Refreshing reference metadata ${
+          saved + failed + 1
+        }/${references.length}...`;
+        try {
+          const detail = await client.getBillDetail(reference, controller.signal);
+          if (!this.ownsRequest(controller)) return;
+          this.dependencies.research!.saveMetadata(
+            reference.id,
+            detail,
+            new Date().toISOString(),
+          );
+          saved++;
+        } catch (error) {
+          if (!this.ownsRequest(controller)) return;
+          try {
+            this.dependencies.research!.failMetadata(reference.id, new Date().toISOString());
+          } catch (storageError) {
+            this.status = `Refresh failed and its status could not be stored: ${
+              storageError instanceof Error ? storageError.message : String(storageError)
+            }`;
+            this.notebookView?.refresh();
+            return;
+          }
+          failed++;
+          if (!this.status) {
+            this.status = `Some refreshes failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`;
+          }
+        }
+        this.notebookView?.refresh();
+      }
+      if (controller.signal.aborted) cancelled = true;
+      this.status = `${
+        cancelled ? "Cancelled. " : ""
+      }Refreshed ${saved}/${references.length}; failed ${failed}. Previous failed snapshots retained. Notes unchanged.${
+        failed ? ` ${this.status}` : ""
+      }`;
+    })().finally(() => this.finishRequest(controller));
   }
 
   private handleCommand(char: string): void {

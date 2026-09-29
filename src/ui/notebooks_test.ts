@@ -80,6 +80,42 @@ Deno.test("archive menu scopes exports and confirms imports without mutating not
   });
 });
 
+Deno.test("notebook library shows bounded reference and note counts", async () => {
+  await withStore((store) => {
+    const notebook = store.createNotebook("Counted");
+    store.addReferences(notebook.id, [{ congress: 119, type: "hr", number: 1 }]);
+    store.createNote(notebook.id, { title: "Finding", body: "Body" });
+    store.createNotebook("Empty");
+    const view = new NotebookView(store);
+    const lines = view.lines(30).join("\n");
+    assertStringIncludes(lines, "Counted (1 references, 1 notes)");
+    assertStringIncludes(lines, "Empty (0 references, 0 notes)");
+    store.addReferences(notebook.id, [{ congress: 119, type: "s", number: 2 }]);
+    store.createNote(notebook.id, { title: "Second", body: "More" });
+    press(view, "r");
+    assertStringIncludes(view.lines(30).join("\n"), "Counted (2 references, 2 notes)");
+  });
+});
+
+Deno.test("notebook UI refreshes one reference or the visible page explicitly", async () => {
+  await withStore((store) => {
+    const notebook = store.createNotebook("Refresh");
+    store.addReferences(
+      notebook.id,
+      Array.from({ length: 3 }, (_, index) => ({ congress: 119, type: "hr", number: index + 1 })),
+    );
+    const view = new NotebookView(store);
+    view.handle({ kind: "enter" });
+    const highlighted = view.handle({ kind: "char", value: "f" });
+    assertEquals(highlighted?.kind, "refresh");
+    const page = view.handle({ kind: "char", value: "F" });
+    if (page?.kind !== "refreshPage") throw new Error("Expected page refresh");
+    assertEquals(page.references.length, 3);
+    assertStringIncludes(view.lines(30).join("\n"), "F current page metadata");
+    assertEquals(store.countReferences(notebook.id), 3);
+  });
+});
+
 Deno.test("notebook UI paginates, filters, and compares without restricting membership", async () => {
   await withStore((store) => {
     const notebook = store.createNotebook("Many");

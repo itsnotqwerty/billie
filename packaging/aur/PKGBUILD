@@ -1,6 +1,6 @@
 # Maintainer: Samuel Roux <office@gatewaycorporate.org>
 pkgname=billie
-pkgver=1.0.0
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="AI-powered TUI for the Congress.gov API — search, compare, analyze legislation"
 arch=('x86_64')

@@ -32,7 +32,8 @@ export class NotesView {
     | "discard"
     | "delete"
     | "prompt"
-    | "generating" = "list";
+    | "generating"
+    | "find" = "list";
   private notes: NoteSummary[] = [];
   private selected = 0;
   private after?: string;
@@ -44,6 +45,7 @@ export class NotesView {
   private input = "";
   private scroll = 0;
   private status = "";
+  private query = "";
   private deleting: NoteSummary | null = null;
   private citationCount = 0;
   private citations: CitationView | null = null;
@@ -160,26 +162,38 @@ export class NotesView {
       }
       return;
     }
-    if (this.mode === "title") {
+    if (this.mode === "title" || this.mode === "find") {
       if (key.kind === "escape") this.mode = this.draft ? "review" : "list";
       else if (key.kind === "char") this.input += key.value;
       else if (key.kind === "backspace") this.input = [...this.input].slice(0, -1).join("");
       else if (key.kind === "enter") {
-        if (!this.input.trim()) throw new Error("Note title is required.");
-        if (this.draft) {
-          this.draft = await this.drafts.rename(this.draft, this.input.trim());
-          this.mode = "review";
+        if (this.mode === "find") {
+          this.query = this.input.trim();
+          this.after = undefined;
+          this.previous = [];
+          this.selected = 0;
+          this.reload();
+          this.mode = "list";
+          this.status = this.query
+            ? `Searching note titles and bodies: ${this.query}`
+            : "Search cleared.";
         } else {
-          this.draft = await this.drafts.create({
-            notebookId: this.notebookId,
-            noteId: null,
-            revision: null,
-            title: this.input.trim(),
-            body: "",
-          });
-          this.body = "";
-          this.mode = "review";
-          return { kind: "edit", filePath: this.draft.filePath };
+          if (!this.input.trim()) throw new Error("Note title is required.");
+          if (this.draft) {
+            this.draft = await this.drafts.rename(this.draft, this.input.trim());
+            this.mode = "review";
+          } else {
+            this.draft = await this.drafts.create({
+              notebookId: this.notebookId,
+              noteId: null,
+              revision: null,
+              title: this.input.trim(),
+              body: "",
+            });
+            this.body = "";
+            this.mode = "review";
+            return { kind: "edit", filePath: this.draft.filePath };
+          }
         }
       }
       return;
@@ -237,6 +251,9 @@ export class NotesView {
       this.input = "";
       this.mode = "prompt";
       this.status = "";
+    } else if (command === "/") {
+      this.input = this.query;
+      this.mode = "find";
     } else if (command === "n" || (command === "e" && this.notes.length === 0)) {
       this.input = "";
       this.mode = "title";
@@ -397,14 +414,17 @@ export class NotesView {
   }
 
   private reload(): void {
-    const page = this.repository.listNotes(this.notebookId, { after: this.after });
+    const page = this.repository.listNotes(this.notebookId, {
+      after: this.after,
+      query: this.query,
+    });
     this.notes = page.items;
     this.next = page.nextCursor;
     this.selected = Math.max(0, Math.min(this.selected, this.notes.length - 1));
   }
 
   private page(after: string | undefined, forward: boolean): void {
-    const page = this.repository.listNotes(this.notebookId, { after });
+    const page = this.repository.listNotes(this.notebookId, { after, query: this.query });
     if (forward) this.previous.push(this.after);
     else this.previous.pop();
     this.after = after;
@@ -442,8 +462,14 @@ export class NotesView {
           ? "  Generating... Esc cancel"
           : "  Enter send prompt / Esc cancel",
       ];
-    } else if (this.mode === "title") {
-      lines = ["  Note title", "", `  > ${this.input}`, "", "  Enter accept / Esc cancel"];
+    } else if (this.mode === "title" || this.mode === "find") {
+      lines = [
+        this.mode === "find" ? "  Search note titles and bodies" : "  Note title",
+        "",
+        `  > ${this.input}`,
+        "",
+        "  Enter accept / Esc cancel",
+      ];
     } else if (this.mode === "discard") {
       lines = [
         "  Discard this draft and its recovery files? Stored note is unchanged.",
@@ -487,11 +513,11 @@ export class NotesView {
             : ""
         }`,
         this.notes.length
-          ? "  n new / a AI note / Enter read / e micro / c citations / w export / x delete / r reload / R recover"
-          : "  n/e new note in micro / a AI note / r reload / R recover latest draft",
-        `  l next / b previous / Esc back | Page ${this.previous.length + 1}${
+          ? "  n new / a AI note / Enter read / e micro / c citations / w export / x delete / / search"
+          : "  n/e new note in micro / a AI note / / search / R recover latest draft",
+        `  r reload | l next / b previous / Esc back | Page ${this.previous.length + 1}${
           this.next ? " (more available)" : ""
-        }`,
+        }${this.query ? ` | Search: ${this.query}` : ""}`,
         "",
         ...(this.notes.length
           ? this.notes.slice(start, start + available).map((note, index) =>

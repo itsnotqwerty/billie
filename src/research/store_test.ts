@@ -521,6 +521,25 @@ Deno.test("notes preserve Markdown exactly and use optimistic revisions across c
   });
 });
 
+Deno.test("notes search bodies without exposing body text or changing paging", async () => {
+  await withStore((store) => {
+    const notebook = store.createNotebook("Search");
+    const needle = store.createNote(notebook.id, {
+      title: "Wildfire hearing",
+      body: "Findings mention resilience funding.",
+    });
+    store.createNote(notebook.id, { title: "Climate note", body: "No phrase here." });
+    const query = store.listNotes(notebook.id, { query: "RESILIENCE", limit: 1 });
+    assertEquals(query.items.map((note) => note.id), [needle.id]);
+    assertEquals("body" in query.items[0], false);
+    assertEquals(store.countNotes(notebook.id, "resilience"), 1);
+    assertEquals(store.countNotes(notebook.id), 2);
+    assertEquals(store.listNotes(notebook.id, { query: "climate" }).items[0].title, "Climate note");
+    assertEquals(store.listNotes(notebook.id, { query: "missing" }).items, []);
+    assertThrows(() => store.listNotes(notebook.id, { query: "x", limit: 0 }));
+  });
+});
+
 Deno.test("citations enforce notebook ownership and roll back invalid batches", async () => {
   await withStore((store, filePath) => {
     const notebook = store.createNotebook("Local");

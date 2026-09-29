@@ -105,6 +105,119 @@ Deno.test("App explicitly refreshes notebook metadata without fetching on open",
   });
 });
 
+Deno.test("App refreshes the visible notebook page and preserves failed snapshots", async () => {
+  await withResearch(async (research) => {
+    const notebook = research.createNotebook("Page metadata");
+    research.addReferences(notebook.id, [
+      { ...bill, number: 1 },
+      { ...bill, type: "s", number: 2 },
+      { ...bill, type: "hres", number: 3 },
+    ]);
+    const references = research.listReferences(notebook.id).items;
+    research.saveMetadata(references[0].id, {
+      ...bill,
+      congress: references[0].congress,
+      type: references[0].type,
+      number: references[0].number,
+      title: "Original snapshot",
+      url: `https://api.congress.gov/v3/bill/${references[0].congress}/${references[0].type}/${
+        references[0].number
+      }`,
+    }, "2026-09-28T00:00:00Z");
+    let calls = 0;
+    const first = deferred<BillDetail>();
+    const client = {
+      ...fakeClient(() => Promise.resolve([])),
+      getBillDetail: (reference: BillSummary) => {
+        calls++;
+        if (reference.type === "hr") return first.promise;
+        if (reference.type === "s") return Promise.reject(new Error("Congress service failed"));
+        return Promise.resolve({
+          ...bill,
+          congress: reference.congress,
+          type: reference.type,
+          number: reference.number,
+          title: `Updated ${reference.number}`,
+          url:
+            `https://api.congress.gov/v3/bill/${reference.congress}/${reference.type}/${reference.number}`,
+        });
+      },
+    };
+    await exercise(
+      async function* (screen) {
+        yield* type("u");
+        yield { kind: "enter" };
+        assertStringIncludes(screen(), "Original snapshot");
+        yield* type("F");
+        await settle();
+        first.resolve({
+          ...bill,
+          title: "Updated 1",
+          url: "https://api.congress.gov/v3/bill/119/hr/1",
+        });
+        await settle();
+        assertEquals(calls, 3);
+        assertStringIncludes(screen(), "Updated 1");
+        assertStringIncludes(screen(), "Updated 3");
+        assertStringIncludes(screen(), "Refreshed 2/3; failed 1");
+        const updated = research.listReferences(notebook.id).items;
+        assertEquals(
+          updated.find((ref) => ref.type === "hr")!.metadata!.refreshError,
+          null,
+        );
+        assertEquals(
+          updated.find((ref) => ref.type === "s")!.metadata!.refreshError !== null,
+          true,
+        );
+        assertEquals(updated.find((ref) => ref.type === "hres")!.metadata!.title, "Updated 3");
+      },
+      client,
+      {},
+      { research },
+    );
+  });
+});
+
+Deno.test("App cancels page metadata refresh without touching later references", async () => {
+  await withResearch(async (research) => {
+    const notebook = research.createNotebook("Cancel refresh");
+    research.addReferences(notebook.id, [
+      { ...bill, number: 1 },
+      { ...bill, type: "s", number: 2 },
+    ]);
+    let calls = 0;
+    const pending = deferred<BillDetail>();
+    await exercise(
+      async function* (screen) {
+        yield* type("u");
+        yield { kind: "enter" };
+        yield* type("F");
+        await settle();
+        assertStringIncludes(screen(), "Refreshing reference metadata 1/2");
+        yield { kind: "escape" };
+        await settle();
+        assertEquals(calls, 1);
+        assertStringIncludes(screen(), "unresolved");
+        assertEquals(
+          research.listReferences(notebook.id).items.every((ref) => !ref.metadata),
+          true,
+        );
+        pending.reject(new Error("Late cancellation"));
+        await settle();
+      },
+      {
+        ...fakeClient(() => Promise.resolve([])),
+        getBillDetail: () => {
+          calls++;
+          return pending.promise;
+        },
+      },
+      {},
+      { research },
+    );
+  });
+});
+
 Deno.test("App notes use the shared export menu and preserve reading position on return", async () => {
   await withResearch(async (research) => {
     const notebook = research.createNotebook("Exports");

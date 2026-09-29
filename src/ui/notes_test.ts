@@ -206,6 +206,46 @@ Deno.test("note export includes every citation without modifying notes or saving
   });
 });
 
+Deno.test("notes search titles and bodies with bounded pages and no body reads", async () => {
+  await fixture(async (store, drafts, notebookId) => {
+    for (let index = 0; index < 55; index++) {
+      store.createNote(notebookId, {
+        title: `Note ${index}`,
+        body: index === 54 ? "Body only match: resilience funding" : "Ordinary body",
+      });
+    }
+    let reads = 0;
+    const get = store.getNote.bind(store);
+    store.getNote = (id) => {
+      reads++;
+      return get(id);
+    };
+    const view = new NotesView(store, drafts, notebookId);
+    assertEquals(reads, 0);
+    await press(view, "/resilience");
+    await view.handle({ kind: "enter" });
+    assertStringIncludes(view.lines(30).join("\n"), "Search: resilience");
+    assertStringIncludes(view.lines(30).join("\n"), "Note 54");
+    assertEquals(view.lines(30).join("\n").includes("Note 0"), false);
+    assertEquals(reads, 0);
+    await view.handle({ kind: "enter" });
+    assertStringIncludes(view.lines(30).join("\n"), "resilience funding");
+    assertEquals(reads, 1);
+    await view.handle({ kind: "escape" });
+    await press(view, "/climate");
+    await view.handle({ kind: "enter" });
+    assertStringIncludes(view.lines(30).join("\n"), "No notes.");
+    await press(view, "/");
+    for (let index = 0; index < "resilienceclimate".length; index++) {
+      await view.handle({ kind: "backspace" });
+    }
+    await view.handle({ kind: "enter" });
+    assertStringIncludes(view.lines(30).join("\n"), "Search cleared.");
+    assertStringIncludes(view.lines(30).join("\n"), "Page 1 (more available)");
+    assertEquals(store.countNotes(notebookId), 55);
+  });
+});
+
 Deno.test("note UI creates a micro draft and saves only after explicit confirmation", async () => {
   await fixture(async (store, drafts, notebookId) => {
     const view = new NotesView(store, drafts, notebookId);
